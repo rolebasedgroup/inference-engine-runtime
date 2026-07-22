@@ -77,7 +77,7 @@ class VLLMProxyTopoClient(GroupTopoClient):
             if resp.status_code == 200:
                 logger.info("Health check OK, inference engine is now ready.")
             else:
-                raise Exception(
+                raise RuntimeError(
                     f"health check failed, url: {health_check_url}, "
                     f"status_code: {resp.status_code}, content: {resp.text}"
                 )
@@ -94,7 +94,7 @@ class VLLMProxyTopoClient(GroupTopoClient):
         try:
             worker_type = worker_info.get("type") or worker_info.get("worker_type")
             if worker_type is None:
-                raise Exception("worker type is not set")
+                raise RuntimeError("worker type is not set")
 
             payload = {
                 "type": worker_type,
@@ -112,7 +112,7 @@ class VLLMProxyTopoClient(GroupTopoClient):
                 if 200 <= resp.status_code < 300:
                     logger.info(f"registered vLLM instance successfully. instance: {payload['instance']}")
                 else:
-                    raise Exception(
+                    raise RuntimeError(
                         f"register failed, url: {instance_add_url}, "
                         f"status_code: {resp.status_code}, content: {resp.text}"
                     )

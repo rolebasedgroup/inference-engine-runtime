@@ -38,7 +38,7 @@ class TopoTypeValidationMixin:
                 raise ValueError(
                     "topo_type is not set. Please provide it in the request or set the TOPO_TYPE environment variable.")
             values['topo_type'] = topo_type
-        if topo_type not in SUPPORTED_TOPO_TYPES:
+        if topo_type.lower() not in [t.lower() for t in SUPPORTED_TOPO_TYPES]:
             raise ValueError(
                 f"Invalid topo_type: '{topo_type}'. Supported values are: {', '.join(SUPPORTED_TOPO_TYPES)}.")
 

@@ -39,15 +39,15 @@ def get_worker_endpoint(worker_info: dict) -> Optional[str]:
         return f"{worker_endpoint}:{port}"
 
     # Use headless service pod domain if POD_IP is not set
-    rbg_group_name = os.getenv("RBG_GROUP_NAME")
+    rbg_group_name = envs.GROUP_NAME
     if rbg_group_name is None:
         raise RuntimeError("RBG_GROUP_NAME is not set")
 
-    role_name = os.getenv("RBG_ROLE_NAME")
+    role_name = envs.ROLE_NAME
     if role_name is None:
         raise RuntimeError("RBG_ROLE_NAME is not set")
 
-    role_index = os.getenv("RBG_ROLE_INDEX")
+    role_index = envs.ROLE_INDEX
     if role_index is None:
         raise RuntimeError("RBG_ROLE_INDEX is not set")
 
