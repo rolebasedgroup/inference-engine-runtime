@@ -2,6 +2,7 @@
 """
 Tests for the server router endpoints.
 """
+
 import pytest
 from fastapi.testclient import TestClient
 

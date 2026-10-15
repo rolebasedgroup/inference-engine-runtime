@@ -7,7 +7,11 @@ from urllib.parse import urljoin
 
 import httpx
 
-from patio.api.protocol import LoadLoraAdapterRequest, ErrorResponse, UnLoadLoraAdapterRequest
+from patio.api.protocol import (
+    LoadLoraAdapterRequest,
+    ErrorResponse,
+    UnLoadLoraAdapterRequest,
+)
 from patio.api.response_error import server_error
 from patio.engine.base import InferenceEngine
 from patio.logger import init_logger
@@ -17,7 +21,8 @@ logger = init_logger(__name__)
 
 class SGLangInferenceEngine(InferenceEngine):
     def __init__(
-            self, name: str, version: str, endpoint: str, api_key: Optional[str] = None):
+        self, name: str, version: str, endpoint: str, api_key: Optional[str] = None
+    ):
         if api_key is not None:
             headers = {"Authorization": f"Bearer {api_key}"}
         else:
@@ -26,14 +31,17 @@ class SGLangInferenceEngine(InferenceEngine):
         super().__init__(name, version, endpoint)
 
     async def load_lora_adapter(
-            self, request: LoadLoraAdapterRequest
+        self, request: LoadLoraAdapterRequest
     ) -> Union[ErrorResponse, str]:
         load_url = urljoin(self.endpoint, "/load_lora_adapter")
         lora_name, lora_path = request.lora_name, request.lora_path
         try:
             # Load LoRA timeout 30 mins
             response = await self.client.post(
-                load_url, json=request.model_dump(), headers=self.headers, timeout=30 * 60,
+                load_url,
+                json=request.model_dump(),
+                headers=self.headers,
+                timeout=30 * 60,
             )
         except Exception as e:
             logger.error(
@@ -55,7 +63,7 @@ class SGLangInferenceEngine(InferenceEngine):
         return f"Success: LoRA adapter '{lora_name}' added successfully."
 
     async def unload_lora_adapter(
-            self, request: UnLoadLoraAdapterRequest
+        self, request: UnLoadLoraAdapterRequest
     ) -> Union[ErrorResponse, str]:
         unload_url = urljoin(self.endpoint, "/unload_lora_adapter")
         lora_name = request.lora_name

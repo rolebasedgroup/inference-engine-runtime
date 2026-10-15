@@ -33,7 +33,7 @@ class RenameStandardRule(StandardRule):
         # rename all the samples
         _samples = []
         for s in metric.samples:
-            s_name = self.new_name + s.name[len(self.old_name):]
+            s_name = self.new_name + s.name[len(self.old_name) :]
             _samples.append(
                 Sample(
                     s_name,

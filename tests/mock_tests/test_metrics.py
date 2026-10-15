@@ -2,6 +2,7 @@
 """
 Tests for the metrics components.
 """
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -10,11 +11,14 @@ from prometheus_client import CollectorRegistry, Counter, Histogram
 from patio.metrics.metrics import REQUEST_COUNT, REQUEST_LATENCY, patio_registry
 from patio.metrics.engine_collector import EngineCollector
 from patio.metrics.standard_rules import RenameStandardRule
-from patio.metrics.engine_metric_rules import get_metric_standard_rules, VLLM_METRIC_STANDARD_RULES, \
-    SGLANG_METRIC_STANDARD_RULES
+from patio.metrics.engine_metric_rules import (
+    get_metric_standard_rules,
+    VLLM_METRIC_STANDARD_RULES,
+    SGLANG_METRIC_STANDARD_RULES,
+)
 
 
-@patch('patio.metrics.engine_collector.requests.Session')
+@patch("patio.metrics.engine_collector.requests.Session")
 def test_engine_collector_success(mock_session_class):
     """Test EngineCollector when metrics are successfully collected."""
     # Mock the session and response
@@ -33,7 +37,7 @@ def test_engine_collector_success(mock_session_class):
     assert "test_metric" in result
 
 
-@patch('patio.metrics.engine_collector.requests.Session')
+@patch("patio.metrics.engine_collector.requests.Session")
 def test_engine_collector_http_error(mock_session_class):
     """Test EngineCollector when HTTP error occurs."""
     # Mock the session and response
@@ -52,7 +56,7 @@ def test_engine_collector_http_error(mock_session_class):
     assert result == ""
 
 
-@patch('patio.metrics.engine_collector.requests.Session')
+@patch("patio.metrics.engine_collector.requests.Session")
 def test_engine_collector_exception(mock_session_class):
     """Test EngineCollector when exception occurs."""
     # Mock the session to raise an exception

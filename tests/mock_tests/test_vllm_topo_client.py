@@ -2,6 +2,7 @@
 """
 Tests for the vLLM proxy topology client.
 """
+
 from importlib import reload
 from unittest.mock import MagicMock, patch
 
@@ -128,8 +129,14 @@ def test_register_returns_false_for_proxy_error(mock_post, monkeypatch):
 
     client = VLLMProxyTopoClient({"type": "prefill", "instance": "localhost:8102"})
 
-    with patch("patio.topo.client.vllm_topo_client.utils.retry", side_effect=lambda func, **_: func()):
-        assert client.register("", {"type": "prefill", "instance": "localhost:8102"}) is False
+    with patch(
+        "patio.topo.client.vllm_topo_client.utils.retry",
+        side_effect=lambda func, **_: func(),
+    ):
+        assert (
+            client.register("", {"type": "prefill", "instance": "localhost:8102"})
+            is False
+        )
 
 
 def test_unregister_is_noop(monkeypatch):

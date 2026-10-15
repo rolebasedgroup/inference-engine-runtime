@@ -90,7 +90,9 @@ class VLLMProxyTopoClient(GroupTopoClient):
             traceback.print_exc()
             return False
 
-    def register(self, url: str, worker_info: dict, file_path: Optional[str] = None) -> bool:
+    def register(
+        self, url: str, worker_info: dict, file_path: Optional[str] = None
+    ) -> bool:
         try:
             worker_type = worker_info.get("type") or worker_info.get("worker_type")
             if worker_type is None:
@@ -110,7 +112,9 @@ class VLLMProxyTopoClient(GroupTopoClient):
                     timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
                 )
                 if 200 <= resp.status_code < 300:
-                    logger.info(f"registered vLLM instance successfully. instance: {payload['instance']}")
+                    logger.info(
+                        f"registered vLLM instance successfully. instance: {payload['instance']}"
+                    )
                 else:
                     raise Exception(
                         f"register failed, url: {instance_add_url}, "

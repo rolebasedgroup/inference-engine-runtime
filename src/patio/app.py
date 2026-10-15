@@ -35,6 +35,7 @@ app.include_router(lora_router)
 
 topo_client: GroupTopoClient = None
 
+
 # Middleware to collect metrics
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
@@ -60,8 +61,12 @@ async def metrics_middleware(request: Request, call_next):
 
 def _init_metrics(scrape_metrics: bool):
     if scrape_metrics and envs.INFERENCE_ENGINE_ENDPOINT:
-        scrape_endpoint = urljoin(envs.INFERENCE_ENGINE_ENDPOINT, envs.METRIC_SCRAPE_PATH)
-        engine_collector = EngineCollector(scrape_endpoint, get_metric_standard_rules(envs.INFERENCE_ENGINE))
+        scrape_endpoint = urljoin(
+            envs.INFERENCE_ENGINE_ENDPOINT, envs.METRIC_SCRAPE_PATH
+        )
+        engine_collector = EngineCollector(
+            scrape_endpoint, get_metric_standard_rules(envs.INFERENCE_ENGINE)
+        )
         patio_registry.register(engine_collector)
 
 
@@ -70,6 +75,7 @@ def stop_topo_client_signal_handler(signal, frame):
     if topo_client is not None:
         topo_client.unregister()
     sys.exit(0)
+
 
 def run_topo_client(worker_instance_info: str) -> GroupTopoClient:
     logger = init_logger(__name__)
@@ -80,13 +86,17 @@ def run_topo_client(worker_instance_info: str) -> GroupTopoClient:
     try:
         worker_dict = json.loads(worker_instance_info)
     except json.decoder.JSONDecodeError as e:
-        logger.error(f"Failed to decode worker instance info: {worker_instance_info}: {e}")
+        logger.error(
+            f"Failed to decode worker instance info: {worker_instance_info}: {e}"
+        )
         sys.exit(1)
 
     if not worker_dict.get("topo_type"):
         topo_type = envs.TOPO_TYPE
         if not topo_type:
-            logger.error(f"No topo_type defined for worker instance, either --instance-info or env variable TOPO_TYPE should be set")
+            logger.error(
+                f"No topo_type defined for worker instance, either --instance-info or env variable TOPO_TYPE should be set"
+            )
             sys.exit(1)
         logger.info(f"Found topo type from env variable TOPO_TYPE: {topo_type}")
         worker_dict["topo_type"] = topo_type
@@ -95,7 +105,9 @@ def run_topo_client(worker_instance_info: str) -> GroupTopoClient:
         global topo_client
         worker_info = worker_dict["data"]
         if worker_info is None:
-            logger.error(f"No worker info found for worker instance info, please set \"data\" field in instance info")
+            logger.error(
+                f'No worker info found for worker instance info, please set "data" field in instance info'
+            )
             sys.exit(1)
         topo_client = create_topo_client(worker_dict["topo_type"], worker_info)
         topo_client.wait_engine_ready(worker_info)
@@ -114,7 +126,9 @@ def run_topo_client(worker_instance_info: str) -> GroupTopoClient:
                 except Exception as e:
                     logger.warning(f"heartbeat register failed: {e}")
 
-        t = threading.Thread(target=_heartbeat_loop, daemon=True, name="patio-heartbeat")
+        t = threading.Thread(
+            target=_heartbeat_loop, daemon=True, name="patio-heartbeat"
+        )
         t.start()
         logger.info(f"heartbeat thread started, interval={envs.HEARTBEAT_INTERVAL}s")
 
@@ -133,9 +147,16 @@ def main():
         help="Enable FastAPI docs",
     )
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to listen on")
-    parser.add_argument("--port", type=int, default=DEFAULT_PATIO_PORT, help="Port to listen on")
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_PATIO_PORT, help="Port to listen on"
+    )
     parser.add_argument("--instance-info", type=str, default="", help="instance info")
-    parser.add_argument("--scrape-engine-metrics", type=bool, default=True, help="Enable to scrape engine metrics")
+    parser.add_argument(
+        "--scrape-engine-metrics",
+        type=bool,
+        default=True,
+        help="Enable to scrape engine metrics",
+    )
     parser.add_argument(
         "--log-level",
         type=str,
@@ -155,12 +176,7 @@ def main():
 
     # Run the server
     try:
-        uvicorn.run(
-            app=app,
-            host=args.host,
-            port=args.port,
-            reload=False
-        )
+        uvicorn.run(app=app, host=args.host, port=args.port, reload=False)
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:

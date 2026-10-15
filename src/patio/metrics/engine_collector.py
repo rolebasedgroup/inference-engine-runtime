@@ -27,8 +27,13 @@ class EngineCollector(Collector):
     Collector for Prometheus metrics from an inference engine.
     """
 
-    def __init__(self, scrape_endpoint: str, metric_rules: Dict[str, StandardRule], prefix: str = "",
-                 timeout: float = 2.0):
+    def __init__(
+        self,
+        scrape_endpoint: str,
+        metric_rules: Dict[str, StandardRule],
+        prefix: str = "",
+        timeout: float = 2.0,
+    ):
         self.scrape_endpoint = scrape_endpoint
         self.prefix = prefix
         self.timeout = timeout

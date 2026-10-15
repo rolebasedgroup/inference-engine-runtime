@@ -2,6 +2,7 @@
 """
 Test runner script for the patio module.
 """
+
 import subprocess
 import sys
 import os
@@ -13,15 +14,15 @@ def run_tests():
     # Change to the patio directory
     patio_dir = Path(__file__).parent
     os.chdir(patio_dir)
-    
+
     # Run pytest
     try:
-        result = subprocess.run([
-            sys.executable, "-m", "pytest", 
-            "mock_tests/",
-            "-v", 
-            "--tb=short"
-        ], check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "mock_tests/", "-v", "--tb=short"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         print("Tests completed successfully!")
         print(result.stdout)
         return True

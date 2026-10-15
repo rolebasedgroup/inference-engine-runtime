@@ -4,7 +4,11 @@
 from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
 
-from patio.api.protocol import LoadLoraAdapterRequest, ErrorResponse, UnLoadLoraAdapterRequest
+from patio.api.protocol import (
+    LoadLoraAdapterRequest,
+    ErrorResponse,
+    UnLoadLoraAdapterRequest,
+)
 from patio.engine.base import inference_engine
 from patio.api.response_error import invalid_error
 

@@ -13,8 +13,12 @@ from patio.topo import utils
 
 logger = init_logger(__name__)
 
-def get_rbg_endpoint(group_name: str, role_name: str, index: str, port: str) -> Optional[str]:
+
+def get_rbg_endpoint(
+    group_name: str, role_name: str, index: str, port: str
+) -> Optional[str]:
     return f"{group_name}-{role_name}-{index}.s-{group_name}-{role_name}:{port}"
+
 
 def get_sgl_router_endpoint(worker_info: dict) -> Optional[str]:
     rbg_group_name = envs.GROUP_NAME
@@ -30,6 +34,7 @@ def get_sgl_router_endpoint(worker_info: dict) -> Optional[str]:
         raise RuntimeError("ROUTER_PORT is not set")
 
     return get_rbg_endpoint(rbg_group_name, router_role_name, "0", router_port)
+
 
 def get_worker_endpoint(worker_info: dict) -> Optional[str]:
     port = worker_info.get("port", "30000")
@@ -52,6 +57,7 @@ def get_worker_endpoint(worker_info: dict) -> Optional[str]:
         raise RuntimeError("RBG_ROLE_INDEX is not set")
 
     return get_rbg_endpoint(rbg_group_name, role_name, role_index, port)
+
 
 def get_health_check_endpoint(worker_info: dict) -> Optional[str]:
     port = worker_info.get("port", "30000")
@@ -92,7 +98,8 @@ class SGLangGroupTopoClient(GroupTopoClient):
                 logger.info("Health check OK, inference engine is now ready.")
             else:
                 raise RuntimeError(
-                    f"health check failed, url: {health_check_url}, status_code: {resp.status_code}, content: {resp.text}")
+                    f"health check failed, url: {health_check_url}, status_code: {resp.status_code}, content: {resp.text}"
+                )
 
         try:
             utils.retry(f, retry_times=60, interval=3)
@@ -102,7 +109,9 @@ class SGLangGroupTopoClient(GroupTopoClient):
             traceback.print_exc()
             return False
 
-    def register(self, url: str, worker_info: dict, file_path: Optional[str] = None) -> bool:
+    def register(
+        self, url: str, worker_info: dict, file_path: Optional[str] = None
+    ) -> bool:
         """
         worker_info example:
             port: 8000
@@ -133,9 +142,13 @@ class SGLangGroupTopoClient(GroupTopoClient):
                         f"register failed: missing worker_id in response body, "
                         f"url: {worker_registration_url}, status_code: {resp.status_code}, content: {resp.text}"
                     )
-                logger.info(f"registered worker successfully. worker_id: {self.worker_id}")
+                logger.info(
+                    f"registered worker successfully. worker_id: {self.worker_id}"
+                )
             else:
-                raise RuntimeError(f"register failed, url: {worker_registration_url}, status_code: {resp.status_code}, content: {resp.text}")
+                raise RuntimeError(
+                    f"register failed, url: {worker_registration_url}, status_code: {resp.status_code}, content: {resp.text}"
+                )
 
         try:
             utils.retry(f, retry_times=60, interval=3)
@@ -145,24 +158,30 @@ class SGLangGroupTopoClient(GroupTopoClient):
             traceback.print_exc()
             return False
 
-
     def unregister(self):
         if self.worker_id is None:
-            logger.warning("worker_id is not set, skipping unregister (registration may have failed)")
+            logger.warning(
+                "worker_id is not set, skipping unregister (registration may have failed)"
+            )
             return False
 
         def f():
-            worker_registration_url = f"http://{self.sgl_router_endpoint}/workers/{self.worker_id}"
+            worker_registration_url = (
+                f"http://{self.sgl_router_endpoint}/workers/{self.worker_id}"
+            )
             resp = requests.delete(
                 worker_registration_url,
                 timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
             )
             if resp.status_code == 202:
                 # Status Code 202 Accepted
-                logger.info(f"unregistered worker successfully. worker_id: {self.worker_id}")
+                logger.info(
+                    f"unregistered worker successfully. worker_id: {self.worker_id}"
+                )
             else:
                 raise RuntimeError(
-                    f"unregister failed, url: {worker_registration_url}, status_code: {resp.status_code}, content: {resp.text}")
+                    f"unregister failed, url: {worker_registration_url}, status_code: {resp.status_code}, content: {resp.text}"
+                )
 
         try:
             utils.retry(f, retry_times=60, interval=3)

@@ -152,4 +152,6 @@ def retry(func, args=(), kwargs=None, retry_times=3, interval=1):
         # or if func somehow 'fails' without raising an Exception.
         # For robustness, we could raise a generic error or return a specific sentinel.
         # For now, consistent with raising if last_exception exists.
-        raise RuntimeError("Unexpected state in retry function: No exception recorded despite failure.")
+        raise RuntimeError(
+            "Unexpected state in retry function: No exception recorded despite failure."
+        )

@@ -2,6 +2,7 @@
 """
 Tests for the topology factory.
 """
+
 from importlib import reload
 
 import pytest
@@ -33,7 +34,9 @@ def test_create_topo_client_vllm(monkeypatch):
     monkeypatch.setenv("ROUTER_PORT", "9000")
     reload(envs)
 
-    client = create_topo_client("vllm", {"type": "prefill", "instance": "localhost:8102"})
+    client = create_topo_client(
+        "vllm", {"type": "prefill", "instance": "localhost:8102"}
+    )
     assert isinstance(client, VLLMProxyTopoClient)
 
 

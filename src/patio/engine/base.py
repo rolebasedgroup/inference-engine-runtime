@@ -10,7 +10,11 @@ import requests
 from urllib.parse import urlparse
 
 from patio import envs
-from patio.api.protocol import ErrorResponse, LoadLoraAdapterRequest, UnLoadLoraAdapterRequest
+from patio.api.protocol import (
+    ErrorResponse,
+    LoadLoraAdapterRequest,
+    UnLoadLoraAdapterRequest,
+)
 from patio.logger import init_logger
 from patio.api.response_error import not_implemented_error
 
@@ -28,16 +32,18 @@ class InferenceEngine(ABC):
         return _is_url_ready(self.endpoint) if self.endpoint else True
 
     async def load_lora_adapter(
-            self, request: LoadLoraAdapterRequest
+        self, request: LoadLoraAdapterRequest
     ) -> Union[ErrorResponse, str]:
         return not_implemented_error(
-            f"Inference engine {self.name} with version {self.version} not support load lora adapter")
+            f"Inference engine {self.name} with version {self.version} not support load lora adapter"
+        )
 
     async def unload_lora_adapter(
-            self, request: UnLoadLoraAdapterRequest
+        self, request: UnLoadLoraAdapterRequest
     ) -> Union[ErrorResponse, str]:
         return not_implemented_error(
-            f"Inference engine {self.name} with version {self.version} not support unload lora adapter")
+            f"Inference engine {self.name} with version {self.version} not support unload lora adapter"
+        )
 
 
 def inference_engine() -> InferenceEngine:
@@ -52,12 +58,16 @@ def inference_engine() -> InferenceEngine:
 
     if engine.lower() == "vllm":
         from patio.engine.vllm_engine import VLLMInferenceEngine
+
         return VLLMInferenceEngine(engine, version, endpoint)
     elif engine.lower() == "sglang":
         from patio.engine.sglang_engine import SGLangInferenceEngine
+
         return SGLangInferenceEngine(engine, version, endpoint)
     else:
-        raise ValueError(f"Inference engine {engine} with version {version} not support")
+        raise ValueError(
+            f"Inference engine {engine} with version {version} not support"
+        )
 
 
 def _is_url_ready(url: str) -> bool:
@@ -74,7 +84,9 @@ def _is_url_ready(url: str) -> bool:
               False otherwise (e.g., malformed URL, connection refused, timeout).
     """
     if not isinstance(url, str):
-        logger.warning("Invalid input type: INFERENCE_ENGINE_ENDPOINT must be a string.")
+        logger.warning(
+            "Invalid input type: INFERENCE_ENGINE_ENDPOINT must be a string."
+        )
         return False
 
     # 1. Check URL format
@@ -82,10 +94,14 @@ def _is_url_ready(url: str) -> bool:
         parsed_url = urlparse(url)
         # A valid URL should have at least a scheme (http, https) and a network location (domain.com)
         if not all([parsed_url.scheme, parsed_url.netloc]):
-            logger.warning(f"INFERENCE_ENGINE_ENDPOINT Invalid URL format: missing scheme or netloc for '{url}'")
+            logger.warning(
+                f"INFERENCE_ENGINE_ENDPOINT Invalid URL format: missing scheme or netloc for '{url}'"
+            )
             return False
     except Exception as e:
-        logger.warning(f"INFERENCE_ENGINE_ENDPOINT Invalid URL format: parsing error for '{url}' - {e}")
+        logger.warning(
+            f"INFERENCE_ENGINE_ENDPOINT Invalid URL format: parsing error for '{url}' - {e}"
+        )
         return False
 
     # 2. Curl the endpoint (make an HTTP GET request)
@@ -112,7 +128,9 @@ def _is_url_ready(url: str) -> bool:
         # This means the server responded with a 4xx or 5xx status code.
         # For the purpose of "is the URL ready (can we connect)?", the server *is*
         # responding. If you want 4xx/5xx to mean "not ready", change this to return False.
-        logger.info(f"Server responded with HTTP error {e.response.status_code} for '{url}', but is reachable.")
+        logger.info(
+            f"Server responded with HTTP error {e.response.status_code} for '{url}', but is reachable."
+        )
         return True
     except requests.exceptions.RequestException as e:
         # This catches all other requests-related exceptions (e.g., TooManyRedirects, InvalidSchema)

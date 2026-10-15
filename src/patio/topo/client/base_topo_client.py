@@ -16,13 +16,14 @@ logger = init_logger(__name__)
 
 
 class GroupTopoClient(ABC):
-
     @abstractmethod
     def wait_engine_ready(self, worker_info: dict) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    def register(self, url: str, worker_info: dict, file_path: Optional[str] = None) -> bool:
+    def register(
+        self, url: str, worker_info: dict, file_path: Optional[str] = None
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -42,9 +43,12 @@ class GroupTopoClient(ABC):
                 success = self.register(register_url, payload)
                 if success:
                     logger.debug(
-                        f"topo client sends heartbeat successfully. register_url: {register_url}, data: {payload}")
+                        f"topo client sends heartbeat successfully. register_url: {register_url}, data: {payload}"
+                    )
                 else:
-                    logger.error(f"topo client sends heartbeat failed. register_url: {register_url}, data: {payload}")
+                    logger.error(
+                        f"topo client sends heartbeat failed. register_url: {register_url}, data: {payload}"
+                    )
             except Exception as e:
                 logger.error(f"Error while registering instance {worker_dict}: {e}")
                 traceback.print_exception(e)

@@ -9,7 +9,6 @@ logger = init_logger(__name__)
 
 
 class GroupTopoServer(ABC):
-
     def __init__(self):
         self.worker_heartbeats = {}
 
