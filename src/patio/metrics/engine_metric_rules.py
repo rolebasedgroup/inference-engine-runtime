@@ -21,47 +21,60 @@ gpu_cache_usage = "patio:gpu_cache_usage_perc"
 # vllm metrics: https://docs.vllm.ai/en/latest/design/metrics.html
 VLLM_METRIC_STANDARD_RULES: Dict[str, StandardRule] = {
     "vllm:num_requests_running": RenameStandardRule(
-        "vllm:num_requests_running", num_requests_running,
+        "vllm:num_requests_running",
+        num_requests_running,
     ),
     "vllm:num_requests_waiting": RenameStandardRule(
-        "vllm:num_requests_waiting", num_requests_waiting,
+        "vllm:num_requests_waiting",
+        num_requests_waiting,
     ),
     "vllm:time_to_first_token_seconds": RenameStandardRule(
-        "vllm:time_to_first_token_seconds", TTFT,
+        "vllm:time_to_first_token_seconds",
+        TTFT,
     ),
     "vllm:request_time_per_output_token_seconds": RenameStandardRule(
-        "vllm:request_time_per_output_token_seconds", TPOT,
+        "vllm:request_time_per_output_token_seconds",
+        TPOT,
     ),
     "vllm:inter_token_latency_seconds": RenameStandardRule(
-        "vllm:inter_token_latency_seconds", ITL,
+        "vllm:inter_token_latency_seconds",
+        ITL,
     ),
     "vllm:kv_cache_usage_perc": RenameStandardRule(
-        "vllm:kv_cache_usage_perc", gpu_cache_usage,
+        "vllm:kv_cache_usage_perc",
+        gpu_cache_usage,
     ),
     "vllm:e2e_request_latency_seconds": RenameStandardRule(
-        "vllm:e2e_request_latency_seconds", e2e_latency,
+        "vllm:e2e_request_latency_seconds",
+        e2e_latency,
     ),
 }
 
 # sglang metrics: https://docs.sglang.ai/references/production_metrics.html
-SGLANG_METRIC_STANDARD_RULES = {
+SGLANG_METRIC_STANDARD_RULES: Dict[str, StandardRule] = {
     "sglang:num_running_reqs": RenameStandardRule(
-        "sglang:num_running_reqs", num_requests_running,
+        "sglang:num_running_reqs",
+        num_requests_running,
     ),
     "sglang:num_queue_reqs": RenameStandardRule(
-        "sglang:num_queue_reqs", num_requests_waiting,
+        "sglang:num_queue_reqs",
+        num_requests_waiting,
     ),
     "sglang:token_usage": RenameStandardRule(
-        "sglang:token_usage", gpu_cache_usage,
+        "sglang:token_usage",
+        gpu_cache_usage,
     ),
     "sglang:time_to_first_token_seconds": RenameStandardRule(
-        "sglang:time_to_first_token_seconds", TTFT,
+        "sglang:time_to_first_token_seconds",
+        TTFT,
     ),
     "sglang:inter_token_latency_seconds": RenameStandardRule(
-        "sglang:inter_token_latency_seconds", ITL,
+        "sglang:inter_token_latency_seconds",
+        ITL,
     ),
     "sglang:e2e_request_latency_seconds": RenameStandardRule(
-        "sglang:e2e_request_latency_seconds", e2e_latency,
+        "sglang:e2e_request_latency_seconds",
+        e2e_latency,
     ),
 }
 

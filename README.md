@@ -91,27 +91,33 @@ with the proxy using `/instances/add`.
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - Kubernetes cluster with [RoleBasedGroup](https://github.com/sgl-project/rbg) installed
 - Inference engine (SGLang or vLLM) running in the same pod
 
 ### Installation
 
-Install dependencies:
+Install the package from source (project uses `pyproject.toml` for packaging):
 
 ```bash
-pip install -r requirements.txt
+pip install .
 ```
 
-For development, also install test dependencies:
+For development, install in editable mode with test dependencies:
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 ```
 
 ### Running Locally
 
 Start the Patio server:
+
+```bash
+patio --host 127.0.0.1 --port 9091
+```
+
+Or via the module entry:
 
 ```bash
 python -m patio.app --host 127.0.0.1 --port 9091
@@ -235,28 +241,30 @@ spec:
 
 ```
 inference-engine-runtime/
-├── app.py                  # Main entry point (FastAPI + uvicorn)
-├── config.py               # Configuration constants
-├── envs.py                 # Environment variable parsing
-├── logger.py               # Logging configuration
-├── api/                    # HTTP API layer
-│   ├── server_router.py    # Server endpoints
-│   ├── lora_router.py      # LoRA endpoints
-│   └── protocol.py         # Request/response models
-├── engine/                 # Inference engine abstraction
-│   ├── base.py             # Base engine interface
-│   ├── sglang_engine.py    # SGLang implementation
-│   └── vllm_engine.py      # vLLM implementation
-├── metrics/                # Prometheus metrics
-│   ├── metrics.py          # Built-in metrics
-│   ├── engine_collector.py # Engine metrics scraper
-│   └── standard_rules.py   # Metric normalization
-├── topo/                   # Topology management
-│   ├── factory.py          # Client/server factories
-│   ├── client/             # Topology clients
-│   └── server/             # Topology servers
-├── tests/                  # Unit and E2E tests
-└── doc/                    # Additional documentation
+├── pyproject.toml           # Packaging and project configuration
+├── src/patio/               # Source package
+│   ├── app.py               # Main entry point (FastAPI + uvicorn)
+│   ├── config.py            # Configuration constants
+│   ├── envs.py              # Environment variable parsing
+│   ├── logger.py            # Logging configuration
+│   ├── api/                 # HTTP API layer
+│   │   ├── server_router.py # Server endpoints
+│   │   ├── lora_router.py   # LoRA endpoints
+│   │   └── protocol.py      # Request/response models
+│   ├── engine/              # Inference engine abstraction
+│   │   ├── base.py          # Base engine interface
+│   │   ├── sglang_engine.py # SGLang implementation
+│   │   └── vllm_engine.py   # vLLM implementation
+│   ├── metrics/             # Prometheus metrics
+│   │   ├── metrics.py       # Built-in metrics
+│   │   ├── engine_collector.py # Engine metrics scraper
+│   │   └── standard_rules.py # Metric normalization
+│   └── topo/                # Topology management
+│       ├── factory.py       # Client/server factories
+│       ├── client/          # Topology clients
+│       └── server/          # Topology servers
+├── tests/                   # Unit and E2E tests
+└── doc/                     # Additional documentation
 ```
 
 ## Development
@@ -264,14 +272,11 @@ inference-engine-runtime/
 ### Running Tests
 
 ```bash
-# Run all unit tests
-python -m pytest tests/mock_tests -v
+# Run all unit tests (requires pip install -e ".[dev]" first)
+pytest
 
 # Run specific test file
-python -m pytest tests/mock_tests/test_sglang_engine.py -v
-
-# Run with coverage
-python -m pytest tests/mock_tests --cov=patio --cov-report=term-missing
+pytest tests/mock_tests/test_sglang_engine.py -v
 ```
 
 ### Building Docker Image

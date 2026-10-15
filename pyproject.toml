@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "patio-runtime"
+version = "0.1.0"
+description = "A sidecar runtime for AI inference engines on Kubernetes, providing LoRA management, unified metrics, and topology management"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.68.0",
+    "uvicorn>=0.15.0",
+    "prometheus-client>=0.11.0",
+    "aiohttp>=3.8.0",
+    "httpx>=0.23.0",
+    "requests>=2.28.0",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+patio = "patio.app:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
