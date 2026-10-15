@@ -19,12 +19,12 @@ def vllm_engine():
 async def test_vllm_load_lora_adapter_success(vllm_engine):
     """Test successful loading of a LoRA adapter in VLLM engine."""
     # Mock the HTTP client response
-    mock_response = AsyncMock()
+    mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.text = "Success"
-    
+
     with patch.object(vllm_engine, 'client') as mock_client:
-        mock_client.post.return_value = mock_response
+        mock_client.post = AsyncMock(return_value=mock_response)
         
         # Prepare the request
         request = LoadLoraAdapterRequest(
@@ -44,12 +44,12 @@ async def test_vllm_load_lora_adapter_success(vllm_engine):
 async def test_vllm_load_lora_adapter_http_error(vllm_engine):
     """Test HTTP error when loading a LoRA adapter in VLLM engine."""
     # Mock the HTTP client response
-    mock_response = AsyncMock()
+    mock_response = MagicMock()
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
-    
+
     with patch.object(vllm_engine, 'client') as mock_client:
-        mock_client.post.return_value = mock_response
+        mock_client.post = AsyncMock(return_value=mock_response)
         
         # Prepare the request
         request = LoadLoraAdapterRequest(
@@ -90,12 +90,12 @@ async def test_vllm_load_lora_adapter_exception(vllm_engine):
 async def test_vllm_unload_lora_adapter_success(vllm_engine):
     """Test successful unloading of a LoRA adapter in VLLM engine."""
     # Mock the HTTP client response
-    mock_response = AsyncMock()
+    mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.text = "Success"
-    
+
     with patch.object(vllm_engine, 'client') as mock_client:
-        mock_client.post.return_value = mock_response
+        mock_client.post = AsyncMock(return_value=mock_response)
         
         # Prepare the request
         request = UnLoadLoraAdapterRequest(
@@ -114,12 +114,12 @@ async def test_vllm_unload_lora_adapter_success(vllm_engine):
 async def test_vllm_unload_lora_adapter_http_error(vllm_engine):
     """Test HTTP error when unloading a LoRA adapter in VLLM engine."""
     # Mock the HTTP client response
-    mock_response = AsyncMock()
+    mock_response = MagicMock()
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
-    
+
     with patch.object(vllm_engine, 'client') as mock_client:
-        mock_client.post.return_value = mock_response
+        mock_client.post = AsyncMock(return_value=mock_response)
         
         # Prepare the request
         request = UnLoadLoraAdapterRequest(

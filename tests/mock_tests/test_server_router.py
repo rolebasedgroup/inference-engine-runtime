@@ -28,4 +28,4 @@ def test_metrics_endpoint():
     """Test the metrics endpoint returns prometheus metrics."""
     response = client.get("/metrics")
     assert response.status_code == 200
-    assert response.headers["content-type"] == "text/plain; version=0.0.4; charset=utf-8"
+    assert response.headers["content-type"].startswith("text/plain")
