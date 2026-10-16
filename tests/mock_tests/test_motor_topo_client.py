@@ -5,12 +5,17 @@ Tests for the MindIE Motor topo client (MotorTopoClient).
 from importlib import reload
 from unittest.mock import MagicMock, patch
 
+import time
+
 from patio import envs
 from patio.topo.client.motor_topo_client import (
     MotorTopoClient,
     build_body,
     build_job_name,
     derive_instance_id,
+    detect_worker_type,
+    get_dispatch_capabilities,
+    get_engine_type,
     get_motor_endpoint,
     get_worker_address,
     split_address,
@@ -586,3 +591,198 @@ def test_unregister_carries_cached_model_name_after_engine_death(mock_post, monk
         body = mock_post.call_args[1]["json"]
         assert body["event"] == "del"
         assert body["instances"][0]["model_name"] == "Qwen2.5-7B"
+
+
+# ---------------------------------------------------------------------------
+# unregister: shutdown-safe behaviour (bounded, fail-fast)
+#
+# unregister() runs inside the SIGTERM/SIGINT handler, so it must not inherit
+# the 60x3s registration retry budget (that would delay pod termination by
+# minutes). These tests pin the bounded/fail-fast contract.
+# ---------------------------------------------------------------------------
+
+
+def _make_registered_client(monkeypatch):
+    """A MotorTopoClient that believes it is registered (as after a successful add).
+
+    Deadline/interval are shrunk so the bounded-retry tests stay fast.
+    """
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("MOTOR_MODEL_NAME", "test-model")
+    client = _make_client(monkeypatch)
+    monkeypatch.setattr(envs, "MOTOR_UNREGISTER_DEADLINE", 0.3)
+    monkeypatch.setattr(envs, "MOTOR_UNREGISTER_INTERVAL", 0.01)
+    monkeypatch.setattr(envs, "MOTOR_UNREGISTER_TIMEOUT", 1.0)
+    client._model_name = "test-model"
+    client._registered = True
+    return client
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_unregister_treats_404_as_already_deregistered(mock_post, monkeypatch):
+    """A Coordinator that no longer knows the instance (restart) means the
+    desired end state is already reached: report success, do not retry."""
+    client = _make_registered_client(monkeypatch)
+
+    response = MagicMock()
+    response.status_code = 404
+    response.text = "not found"
+    mock_post.return_value = response
+
+    assert client.unregister() is True
+    assert mock_post.call_count == 1
+    assert client._registered is False
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_unregister_fails_fast_on_4xx(mock_post, monkeypatch):
+    """4xx cannot start succeeding by retrying (bad body / identity mismatch /
+    rejected API key): stop immediately instead of sleeping out the deadline."""
+    client = _make_registered_client(monkeypatch)
+
+    response = MagicMock()
+    response.status_code = 400
+    response.text = "invalid request format"
+    mock_post.return_value = response
+
+    assert client.unregister() is False
+    assert mock_post.call_count == 1
+    # Still registered on the Coordinator as far as we know -> mirror stays True.
+    assert client._registered is True
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_unregister_retries_5xx_then_succeeds(mock_post, monkeypatch):
+    """5xx is transient: retry within the deadline and report success."""
+    client = _make_registered_client(monkeypatch)
+
+    transient = MagicMock()
+    transient.status_code = 503
+    transient.text = "unavailable"
+    success = MagicMock()
+    success.status_code = 200
+    success.text = "ok"
+    mock_post.side_effect = [transient, success]
+
+    assert client.unregister() is True
+    assert mock_post.call_count == 2
+    assert client._registered is False
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_unregister_is_bounded_by_deadline_when_coordinator_unreachable(mock_post, monkeypatch):
+    """With the Coordinator gone, unregister() must give up after the deadline
+    instead of blocking SIGTERM for the 60x3s registration budget."""
+    client = _make_registered_client(monkeypatch)
+    mock_post.side_effect = RuntimeError("connection refused")
+
+    started = time.monotonic()
+    assert client.unregister() is False
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, f"unregister blocked for {elapsed:.1f}s, deadline was 0.3s"
+    assert mock_post.call_count >= 1
+    # Untruthful to claim we left the pool -> mirror stays True, and the state is
+    # re-derivable: a later healthy heartbeat re-adds the instance.
+    assert client._registered is True
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_unregister_recovery_after_earlier_failure(mock_post, monkeypatch):
+    """A failed deregistration must not wedge the client: once the Coordinator is
+    back, the next unregister() (or heartbeat register) succeeds normally."""
+    client = _make_registered_client(monkeypatch)
+    mock_post.side_effect = RuntimeError("connection refused")
+    assert client.unregister() is False
+
+    success = MagicMock()
+    success.status_code = 200
+    success.text = "ok"
+    mock_post.side_effect = None
+    mock_post.return_value = success
+
+    assert client.unregister() is True
+    assert client._registered is False
+    # every attempt was a `del` for the same instance
+    assert {c[1]["json"]["event"] for c in mock_post.call_args_list} == {"del"}
+
+
+# ---------------------------------------------------------------------------
+# payload knobs Motor derives itself when the Controller registers an instance
+# ---------------------------------------------------------------------------
+
+def test_detect_worker_type_normalizes_case_and_whitespace():
+    assert detect_worker_type({"type": "  Prefill "}) == "prefill"
+    assert detect_worker_type({"worker_type": "DECODE"}) == "decode"
+
+
+def test_detect_worker_type_accepts_legacy_both_alias():
+    """Motor maps the legacy role name "both" onto PDRole.union."""
+    assert detect_worker_type({"type": "both"}) == "both"
+
+
+def test_detect_worker_type_rejects_role_motor_cannot_map():
+    """Motor validates the role only while inserting into its pools, so an
+    unmappable role would partially apply a request and answer a bare 400.
+    Reject it before any HTTP call instead."""
+    for bad_role in ("P", "D", "Prefill-Decode", "router"):
+        try:
+            detect_worker_type({"type": bad_role})
+        except ValueError as exc:
+            assert "invalid worker type" in str(exc)
+        else:
+            raise AssertionError(f"role {bad_role!r} should have been rejected")
+
+
+def test_detect_worker_type_still_requires_a_role():
+    try:
+        detect_worker_type({})
+    except ValueError as exc:
+        assert "worker type is not set" in str(exc)
+    else:
+        raise AssertionError("missing type must raise")
+
+
+def test_get_engine_type_defaults_to_vllm(monkeypatch):
+    monkeypatch.delenv("MOTOR_ENGINE_TYPE", raising=False)
+    assert get_engine_type() == "vllm"
+    assert build_body("add", "prefill", "10.0.0.1:8000", 1, "m")["instances"][0]["engine_type"] == "vllm"
+
+
+def test_get_engine_type_override_and_validation(monkeypatch):
+    monkeypatch.setenv("MOTOR_ENGINE_TYPE", " SGLang ")
+    assert get_engine_type() == "sglang"
+
+    monkeypatch.setenv("MOTOR_ENGINE_TYPE", "tgi")
+    try:
+        get_engine_type()
+    except ValueError as exc:
+        assert "invalid MOTOR_ENGINE_TYPE" in str(exc)
+    else:
+        raise AssertionError("unsupported engine type must raise")
+
+
+def test_dispatch_capabilities_default_to_vllm_handoff(monkeypatch):
+    monkeypatch.delenv("MOTOR_DISPATCH_CAPABILITIES", raising=False)
+    assert get_dispatch_capabilities() == ["prefill_handoff_decode"]
+    body = build_body("add", "decode", "10.0.0.2:8000", 2, "m")
+    assert body["instances"][0]["dispatch_capabilities"] == ["prefill_handoff_decode"]
+
+
+def test_dispatch_capabilities_override(monkeypatch):
+    monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", "concurrent_engine_sync, decode_colocation")
+    assert get_dispatch_capabilities() == ["concurrent_engine_sync", "decode_colocation"]
+
+    # empty override == "let Motor assume the vLLM default" (HANDOFF)
+    monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", "  ")
+    assert get_dispatch_capabilities() == []
+
+
+def test_build_body_is_self_consistent_for_deregistration():
+    """del must carry the same identity as add (Motor matches role + endpoint
+    identity, and only needs model_name to avoid its own engine probe)."""
+    add = build_body("add", "prefill", "10.0.0.1:8000", 42, "m")["instances"][0]
+    delete = build_body("del", "prefill", "10.0.0.1:8000", 42, "m")["instances"][0]
+    assert add["id"] == delete["id"]
+    assert add["role"] == delete["role"]
+    assert add["endpoints"] == delete["endpoints"]

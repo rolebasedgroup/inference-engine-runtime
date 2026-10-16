@@ -104,15 +104,25 @@ env:
     value: "Qwen2.5-7B"
   - name: MOTOR_MGMT_API_KEY_FILE  # optional; path to the management API key file
     value: "/etc/patio/mgmt-key"
+  - name: MOTOR_ENGINE_TYPE        # optional; engine family advertised to Motor
+    value: "vllm"
+  - name: MOTOR_DISPATCH_CAPABILITIES  # optional; P/D plan, empty = Motor's vLLM HANDOFF default
+    value: "prefill_handoff_decode"
 ```
 
 The worker's P/D role is taken from `type`/`worker_type` in the instance info
-(`prefill` or `decode`), and the endpoint address from the `instance` field,
-`POD_IP`, or the RBG headless DNS. On every heartbeat the engine `/health` is
-probed: while the endpoint is healthy Patio keeps the instance registered
-(event=add); once the endpoint fails, Patio sends event=del so the Coordinator
-stops routing traffic to the dead (P or D) instance — no orphaned registration
-is left behind during multi-DP operation.
+(`prefill` or `decode`, validated against Motor's accepted roles), and the
+endpoint address from the `instance` field, `POD_IP`, or the RBG headless DNS. On
+every heartbeat the engine `/health` is probed: while the endpoint is healthy
+Patio keeps the instance registered (event=add); once the endpoint fails, Patio
+sends event=del so the Coordinator stops routing traffic to the dead (P or D)
+instance — no orphaned registration is left behind during multi-DP operation.
+
+Deregistration on `SIGTERM`/`SIGINT` is bounded by `MOTOR_UNREGISTER_DEADLINE`
+(default 10s) so that a terminating pod is never held up by an unreachable
+Coordinator. See [Motor Registration](doc/motor_registration.md) for the full
+contract, lifecycle and limitations (notably: Motor never expires an instance on
+its own, so the explicit `del` is the only withdrawal path).
 
 ## Quick Start
 
@@ -179,6 +189,11 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `HEARTBEAT_INTERVAL` | Topology heartbeat interval (seconds) | `30` |
 | `MOTOR_MODEL_NAME` | Model name for Motor registration; if unset, resolved from the engine `/v1/models` | `None` |
 | `MOTOR_MGMT_API_KEY_FILE` | Path to the Motor management API key file (optional) | `None` |
+| `MOTOR_ENGINE_TYPE` | Engine family advertised to Motor (`vllm` / `sglang`) | `vllm` |
+| `MOTOR_DISPATCH_CAPABILITIES` | Comma-separated P/D dispatch plans; empty means Motor's vLLM HANDOFF default | `prefill_handoff_decode` |
+| `MOTOR_UNREGISTER_DEADLINE` | Total budget for deregistration at shutdown (seconds) | `10` |
+| `MOTOR_UNREGISTER_INTERVAL` | Interval between shutdown deregistration attempts (seconds) | `1` |
+| `MOTOR_UNREGISTER_TIMEOUT` | Per-request timeout during shutdown deregistration (seconds) | `3` |
 
 ## Usage with RoleBasedGroup
 

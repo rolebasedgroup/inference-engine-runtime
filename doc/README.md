@@ -8,6 +8,7 @@ Welcome to the documentation for Patio, a Python runtime component for the RBGS 
 2. [Engine Components](engine.md) - Inference engine interfaces and implementations
 3. [Metrics](metrics.md) - Prometheus metrics collection and exposition
 4. [Topology](topo.md) - Distributed worker topology management
+5. [Motor Registration](motor_registration.md) - Registering / deregistering an engine instance with MindIE-Motor
 
 ## Overview
 

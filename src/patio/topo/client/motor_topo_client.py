@@ -22,6 +22,7 @@ failed engine is deregistered within one heartbeat interval.
 """
 
 import os
+import time
 import traceback
 import zlib
 from typing import Optional
@@ -47,7 +48,21 @@ MOTOR_ENGINE_TYPE = "vllm"
 MOTOR_MGMT_API_KEY_HEADER = "X-Motor-Management-Key"
 
 # Dispatch capability advertised for this P/D instance (see pd_disaggregation.md).
+# Overridable through MOTOR_DISPATCH_CAPABILITIES because Motor derives the same
+# information from the engine's kv_transfer_config/engine_config when the
+# Controller registers the instance; a sidecar has to state it explicitly.
+# Empty capabilities make Motor assume vLLM HANDOFF, which only matches engines
+# actually configured with a mooncake/nixl handoff connector.
 MOTOR_DISPATCH_CAPABILITIES = ["prefill_handoff_decode"]
+
+# Roles Motor accepts in Instance.role (motor.common.resources.instance.PDRole,
+# plus its legacy "both" alias). Validated client-side: Motor checks the role
+# only while inserting into its pools (PDRole lookup), i.e. after earlier
+# instances of the same request were already applied, and answers a bare 400.
+MOTOR_VALID_ROLES = ("encode", "prefill", "decode", "union", "both")
+
+# Motor only knows the vllm / sglang native adapters.
+MOTOR_ENGINE_TYPES = ("vllm", "sglang")
 
 # Instance / endpoint status values accepted by Motor's InsStatus / EndpointStatus.
 INSTANCE_STATUS_ACTIVE = "active"
@@ -99,11 +114,56 @@ def get_mgmt_headers() -> dict:
 
 
 def detect_worker_type(worker_info: dict) -> str:
-    """Extract the worker role (prefill / decode) from worker_info."""
+    """Extract and validate the worker role from worker_info.
+
+    Motor only accepts encode/prefill/decode/union (plus its legacy "both"
+    alias). Validating here turns a late, partially-applied server-side 400
+    into an immediate, actionable error before any HTTP call is made.
+    """
     worker_type = worker_info.get("type") or worker_info.get("worker_type")
     if worker_type is None:
         raise ValueError("worker type is not set; provide 'type' or 'worker_type' in instance info")
-    return worker_type
+    role = str(worker_type).strip().lower()
+    if role not in MOTOR_VALID_ROLES:
+        raise ValueError(
+            "invalid worker type {!r}; Motor accepts one of {}".format(
+                worker_type, ", ".join(MOTOR_VALID_ROLES)
+            )
+        )
+    return role
+
+
+def get_dispatch_capabilities() -> list:
+    """Dispatch capabilities advertised for this instance.
+
+    Defaults to the vLLM HANDOFF plan, which is what Motor assumes for a vLLM
+    instance with empty capabilities. Override with a comma-separated
+    MOTOR_DISPATCH_CAPABILITIES when the engines use a different P/D
+    coordination profile (e.g. concurrent_engine_sync for trigger-style
+    connectors, decode_colocation for decode co-location).
+    """
+    raw = os.getenv("MOTOR_DISPATCH_CAPABILITIES")
+    if raw is None:
+        return list(MOTOR_DISPATCH_CAPABILITIES)
+    capabilities = [item.strip() for item in raw.split(",") if item.strip()]
+    return capabilities
+
+
+def get_engine_type() -> str:
+    """Engine family advertised to Motor.
+
+    Motor selects its native routing adapter from Instance.engine_type
+    (ADAPTERS = {vllm, sglang}); a wrong value fails at request time with
+    "Unsupported native engine type", so it is validated here.
+    """
+    engine_type = (os.getenv("MOTOR_ENGINE_TYPE") or MOTOR_ENGINE_TYPE).strip().lower()
+    if engine_type not in MOTOR_ENGINE_TYPES:
+        raise ValueError(
+            "invalid MOTOR_ENGINE_TYPE {!r}; Motor accepts one of {}".format(
+                engine_type, ", ".join(MOTOR_ENGINE_TYPES)
+            )
+        )
+    return engine_type
 
 
 def get_worker_address(worker_info: dict) -> str:
@@ -184,8 +244,8 @@ def build_body(event: str, role: str, address: str, instance_id: int,
     instance = {
         "job_name": build_job_name(role, address, model_name),
         "model_name": model_name or "unknown",
-        "engine_type": MOTOR_ENGINE_TYPE,
-        "dispatch_capabilities": list(MOTOR_DISPATCH_CAPABILITIES),
+        "engine_type": get_engine_type(),
+        "dispatch_capabilities": get_dispatch_capabilities(),
         "id": instance_id,
         "role": role,
         "status": INSTANCE_STATUS_ACTIVE,
@@ -233,7 +293,7 @@ class MotorTopoClient(GroupTopoClient):
         self.worker_info = worker_info
         self.mgmt_endpoint = get_motor_endpoint()
         self.mgmt_headers = get_mgmt_headers()
-        self.role = detect_worker_type(worker_info).strip().lower()
+        self.role = detect_worker_type(worker_info)
         self.address = get_worker_address(worker_info)
         self.instance_id = derive_instance_id(self.role, self.address)
         self.health_check_endpoint = _build_health_check_endpoint(worker_info)
@@ -391,6 +451,14 @@ class MotorTopoClient(GroupTopoClient):
         Carries the cached model name (resolved at register time): Motor
         requires model_name for del too, and its fallback /v1/models probe
         would fail against the already-dead engine.
+
+        Bounded by MOTOR_UNREGISTER_DEADLINE instead of the 60x3s registration
+        budget: this runs inside the SIGTERM/SIGINT handler (app.py), and the
+        equivalent vllm-router operation (POST /remove_worker) is immediate, so
+        deregistration must never hold up pod termination. Only transport errors
+        and 5xx are retried; a 4xx answer cannot start succeeding, so it stops
+        the loop at once. A 404 means the Coordinator has no such instance
+        (e.g. it restarted) — the desired end state, reported as success.
         """
         if not self._registered:
             logger.debug("instance %d is not registered, skipping unregister", self.instance_id)
@@ -403,32 +471,60 @@ class MotorTopoClient(GroupTopoClient):
             instance_id=self.instance_id,
             model_name=self._model_name,
         )
+        mgmt_url = "http://{}/instances/refresh".format(self.mgmt_endpoint)
+        deadline = time.monotonic() + envs.MOTOR_UNREGISTER_DEADLINE
 
-        def _do_unregister():
-            mgmt_url = "http://{}/instances/refresh".format(self.mgmt_endpoint)
-            logger.info(
-                "unregistering instance from Motor Coordinator: %s  body=%s",
-                mgmt_url, body,
-            )
-            resp = requests.post(
-                mgmt_url,
-                json=body,
-                headers=self.mgmt_headers,
-                timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
-            )
-            if not 200 <= resp.status_code < 300:
+        while True:
+            try:
+                logger.info(
+                    "unregistering instance from Motor Coordinator: %s  body=%s",
+                    mgmt_url, body,
+                )
+                resp = requests.post(
+                    mgmt_url,
+                    json=body,
+                    headers=self.mgmt_headers,
+                    timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.MOTOR_UNREGISTER_TIMEOUT),
+                )
+                if 200 <= resp.status_code < 300:
+                    logger.info(
+                        "unregistered instance %d (%s) successfully", self.instance_id, self.role
+                    )
+                    self._registered = False
+                    return True
+                if resp.status_code == 404:
+                    logger.info(
+                        "instance %d is not registered on the Coordinator (404), nothing to deregister",
+                        self.instance_id,
+                    )
+                    self._registered = False
+                    return True
+                if 400 <= resp.status_code < 500:
+                    # Malformed body / identity mismatch / rejected API key:
+                    # retrying cannot fix it, so fail fast instead of sleeping.
+                    logger.error(
+                        "unregister rejected permanently, url: %s, status_code: %s, content: %s",
+                        mgmt_url, resp.status_code, resp.text,
+                    )
+                    return False
                 raise RuntimeError(
                     "unregister failed, url: {}, status_code: {}, content: {}".format(
                         mgmt_url, resp.status_code, resp.text
                     )
                 )
-            logger.info("unregistered instance %d (%s) successfully", self.instance_id, self.role)
+            except Exception as e:
+                last_error = e
 
-        try:
-            utils.retry(_do_unregister, retry_times=60, interval=3)
-            self._registered = False
-            return True
-        except Exception as e:
-            logger.error("failed to unregister instance: %s", e)
-            traceback.print_exc()
-            return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error(
+                    "failed to unregister instance %d within %.1fs: %s",
+                    self.instance_id, envs.MOTOR_UNREGISTER_DEADLINE, last_error,
+                )
+                traceback.print_exception(last_error)
+                return False
+            interval = min(envs.MOTOR_UNREGISTER_INTERVAL, remaining)
+            logger.warning(
+                "unregister attempt failed (%s), retrying in %.1fs", last_error, interval
+            )
+            time.sleep(interval)
