@@ -3,7 +3,18 @@
 
 """
 MotorTopoClient — register/unregister inference engine instances with a
-standalone MindIE Motor Coordinator via its /instances/refresh management protocol.
+standalone MindIE Motor Coordinator via its /instances/refresh management
+protocol, using the coordinator-standalone "External Deployer" event schema
+(motor.common.resources.http_msg_spec.ExternalInsEventMsg).
+
+The External Deployer schema is deliberately minimal: a sidecar states only the
+instance id / role / routable endpoints, plus the optional shared model name and
+P/D dispatch plan, and Motor derives the rest (job name, status, DP size,
+multi-endpoint routing) in ExternalInsEventMsg.to_internal(). It also defines
+what a sidecar can express: roles prefill/decode only, engine_type "vllm" only,
+and a single P/D dispatch plan per registration. That matches Motor's standalone
+Coordinator, which routes P/D traffic only and whose CLI
+(``python3 -m motor.coordinator.register``) exposes the same two roles.
 
 MindIE Motor Coordinator is a routing/control-plane component of the SAME
 abstraction class as the SGLang router and the vLLM proxy, so this client lives
@@ -40,33 +51,29 @@ logger = init_logger(__name__)
 STANDALONE_ID_NAMESPACE = 0x40000000
 STANDALONE_ID_MASK = 0x3FFFFFFF
 
-# Engine type accepted by Motor's InsEventMsg protocol. Motor standalone
-# currently accepts "vllm" only.
-MOTOR_ENGINE_TYPE = "vllm"
+# Role a sidecar may register, i.e. ExternalInstance.role as accepted by
+# ExternalInsEventMsg.to_internal(). Motor's standalone Coordinator routes P/D
+# traffic only: its CLI exposes the same two roles, and encode/union instances
+# belong to the Controller-registered topology (InsEventMsg), not to a sidecar.
+MOTOR_EXTERNAL_ROLES = ("prefill", "decode")
+
+# P/D coordination plan, i.e. ExternalInsEventMsg.dispatch_capabilities. The
+# external schema carries ONE plan (an enum), unlike the Controller-shaped
+# InsEventMsg whose Instance.dispatch_capabilities is a list; Motor rejects any
+# value outside _require_external_dispatch_plan (decode_colocation included).
+MOTOR_EXTERNAL_DISPATCH_PLANS = ("prefill_handoff_decode", "concurrent_engine_sync")
+MOTOR_DISPATCH_CAPABILITY = "prefill_handoff_decode"
+
+# Engine family accepted by the External Deployer schema. Motor rejects anything
+# else with "External Deployer currently supports engine_type='vllm' only"; the
+# Controller-shaped schema is the one that also knows the sglang adapter.
+MOTOR_EXTERNAL_ENGINE_TYPE = "vllm"
 
 # Motor management API key header (see management_interfaces.md / register.py)
 MOTOR_MGMT_API_KEY_HEADER = "X-Motor-Management-Key"
 
-# Dispatch capability advertised for this P/D instance (see pd_disaggregation.md).
-# Overridable through MOTOR_DISPATCH_CAPABILITIES because Motor derives the same
-# information from the engine's kv_transfer_config/engine_config when the
-# Controller registers the instance; a sidecar has to state it explicitly.
-# Empty capabilities make Motor assume vLLM HANDOFF, which only matches engines
-# actually configured with a mooncake/nixl handoff connector.
-MOTOR_DISPATCH_CAPABILITIES = ["prefill_handoff_decode"]
-
-# Roles Motor accepts in Instance.role (motor.common.resources.instance.PDRole,
-# plus its legacy "both" alias). Validated client-side: Motor checks the role
-# only while inserting into its pools (PDRole lookup), i.e. after earlier
-# instances of the same request were already applied, and answers a bare 400.
-MOTOR_VALID_ROLES = ("encode", "prefill", "decode", "union", "both")
-
-# Motor only knows the vllm / sglang native adapters.
-MOTOR_ENGINE_TYPES = ("vllm", "sglang")
-
-# Instance / endpoint status values accepted by Motor's InsStatus / EndpointStatus.
-INSTANCE_STATUS_ACTIVE = "active"
-ENDPOINT_STATUS_NORMAL = "normal"
+# Port assumed for a bare host without ":port" in worker_info.
+DEFAULT_ENGINE_PORT = "8000"
 
 
 # ---------------------------------------------------------------------------
@@ -116,52 +123,68 @@ def get_mgmt_headers() -> dict:
 def detect_worker_type(worker_info: dict) -> str:
     """Extract and validate the worker role from worker_info.
 
-    Motor only accepts encode/prefill/decode/union (plus its legacy "both"
-    alias). Validating here turns a late, partially-applied server-side 400
-    into an immediate, actionable error before any HTTP call is made.
+    A sidecar can only register a P/D instance: ExternalInstance.role accepts
+    prefill/decode, and Motor answers a bare 400 ("unsupported external instance
+    role") for anything else. Validating here turns that late, server-side
+    rejection into an immediate, actionable error before any HTTP call is made.
     """
     worker_type = worker_info.get("type") or worker_info.get("worker_type")
     if worker_type is None:
         raise ValueError("worker type is not set; provide 'type' or 'worker_type' in instance info")
     role = str(worker_type).strip().lower()
-    if role not in MOTOR_VALID_ROLES:
+    if role not in MOTOR_EXTERNAL_ROLES:
         raise ValueError(
-            "invalid worker type {!r}; Motor accepts one of {}".format(
-                worker_type, ", ".join(MOTOR_VALID_ROLES)
+            "invalid worker type {!r}; a Motor sidecar can only register {} instances "
+            "(the External Deployer protocol has no encode/union role)".format(
+                worker_type, "/".join(MOTOR_EXTERNAL_ROLES)
             )
         )
     return role
 
 
-def get_dispatch_capabilities() -> list:
-    """Dispatch capabilities advertised for this instance.
+def get_dispatch_capability() -> str:
+    """P/D dispatch plan advertised for this instance.
 
     Defaults to the vLLM HANDOFF plan, which is what Motor assumes for a vLLM
-    instance with empty capabilities. Override with a comma-separated
-    MOTOR_DISPATCH_CAPABILITIES when the engines use a different P/D
-    coordination profile (e.g. concurrent_engine_sync for trigger-style
-    connectors, decode_colocation for decode co-location).
+    instance registered through the External Deployer protocol. Override with
+    MOTOR_DISPATCH_CAPABILITIES when the engines use the trigger/sync profile
+    (concurrent_engine_sync) instead.
+
+    The external schema carries a single plan, unlike the Controller-shaped
+    InsEventMsg whose dispatch_capabilities is a list, so exactly one value is
+    accepted here and it must be one Motor knows.
     """
     raw = os.getenv("MOTOR_DISPATCH_CAPABILITIES")
     if raw is None:
-        return list(MOTOR_DISPATCH_CAPABILITIES)
+        return MOTOR_DISPATCH_CAPABILITY
     capabilities = [item.strip() for item in raw.split(",") if item.strip()]
-    return capabilities
+    if not capabilities:
+        # empty override == "let Motor assume the vLLM default" (HANDOFF)
+        return MOTOR_DISPATCH_CAPABILITY
+    if len(capabilities) != 1 or capabilities[0] not in MOTOR_EXTERNAL_DISPATCH_PLANS:
+        raise ValueError(
+            "invalid MOTOR_DISPATCH_CAPABILITIES {!r}; the External Deployer protocol "
+            "carries exactly one plan from {}".format(
+                raw, ", ".join(MOTOR_EXTERNAL_DISPATCH_PLANS)
+            )
+        )
+    return capabilities[0]
 
 
 def get_engine_type() -> str:
     """Engine family advertised to Motor.
 
-    Motor selects its native routing adapter from Instance.engine_type
-    (ADAPTERS = {vllm, sglang}); a wrong value fails at request time with
-    "Unsupported native engine type", so it is validated here.
+    The External Deployer protocol only serves vllm: Motor rejects any other
+    value in ExternalInsEventMsg.to_internal() with "External Deployer currently
+    supports engine_type='vllm' only". Validated client-side so a misconfigured
+    MOTOR_ENGINE_TYPE (e.g. sglang, which the Controller-shaped schema accepts)
+    fails at startup instead of at registration.
     """
-    engine_type = (os.getenv("MOTOR_ENGINE_TYPE") or MOTOR_ENGINE_TYPE).strip().lower()
-    if engine_type not in MOTOR_ENGINE_TYPES:
+    engine_type = (os.getenv("MOTOR_ENGINE_TYPE") or MOTOR_EXTERNAL_ENGINE_TYPE).strip().lower()
+    if engine_type != MOTOR_EXTERNAL_ENGINE_TYPE:
         raise ValueError(
-            "invalid MOTOR_ENGINE_TYPE {!r}; Motor accepts one of {}".format(
-                engine_type, ", ".join(MOTOR_ENGINE_TYPES)
-            )
+            "invalid MOTOR_ENGINE_TYPE {!r}; a Motor sidecar can only register "
+            "engine_type={!r} instances".format(engine_type, MOTOR_EXTERNAL_ENGINE_TYPE)
         )
     return engine_type
 
@@ -199,15 +222,30 @@ def split_address(address: str) -> tuple[str, str]:
     """Split a ``host:port`` address into (host, port).
 
     Handles bare host without port (port defaults to 8000, matching the
-    worker_info default) as well as IPv4 / DNS host:port forms.
+    worker_info default) as well as IPv4 / DNS host:port forms and bracketed
+    IPv6 (``[2001:db8::1]:8200``) — mirrors
+    ``motor.common.utils.net.split_address``, which parses the address Motor
+    receives in ``ExternalEndpoint.address``.
+
+    A bare, unbracketed IPv6 literal is returned as host-only: ``rpartition``
+    would otherwise read its last hextet as the port.
     """
     address = address.strip()
+    if address.startswith("["):
+        host, sep, remainder = address[1:].partition("]")
+        if not sep:
+            return address, DEFAULT_ENGINE_PORT
+        port = remainder[1:] if remainder.startswith(":") else ""
+        return host, port if port.isdigit() else DEFAULT_ENGINE_PORT
     host, sep, port = address.rpartition(":")
-    if not sep or not host:
-        return address, "8000"
-    if not port.isdigit():
-        return address, "8000"
+    if not sep or not host or not port.isdigit() or ":" in host:
+        return address, DEFAULT_ENGINE_PORT
     return host, port
+
+
+def format_address(host: str, port: str) -> str:
+    """Render ``host:port`` for ``ExternalEndpoint.address`` (IPv6 bracketed)."""
+    return "[{}]:{}".format(host, port) if ":" in host else "{}:{}".format(host, port)
 
 
 def derive_instance_id(role: str, address: str) -> int:
@@ -217,52 +255,53 @@ def derive_instance_id(role: str, address: str) -> int:
         identity = "role|ip:port"
         digest = crc32(identity) & 0x3FFFFFFF
         return 0x40000000 | digest
+
+    A sidecar registers the very same ID for the same role/endpoint pair, so a
+    CLI-registered and a sidecar-registered instance are the same instance.
     """
     identity = "{}|{}".format(role, address.strip())
     digest = zlib.crc32(identity.encode()) & STANDALONE_ID_MASK
     return STANDALONE_ID_NAMESPACE | digest
 
 
-def build_job_name(role: str, address: str, model_name: Optional[str]) -> str:
-    """Derive the job name following Motor CLI's ``{model}-{role}-{ip}-{port}`` scheme."""
-    host, port = split_address(address)
-    name = model_name or "unknown"
-    return "{}-{}-{}-{}".format(name, role, host, port)
-
-
 def build_body(event: str, role: str, address: str, instance_id: int,
                model_name: Optional[str] = None) -> dict:
-    """Build an InsEventMsg-compatible request body.
+    """Build an ExternalInsEventMsg request body for /instances/refresh.
 
-    Schema (motor.common.resources.http_msg_spec.InsEventMsg):
-        {"event": "add"|"del", "instances": [Instance]}
-    where Instance requires job_name / model_name / id / role and exposes
-    endpoints as ``{pod_ip: {endpoint_id: Endpoint}}`` with Endpoint carrying
-    ``ip`` + ``business_port`` (not a combined "address" string).
+    Schema (motor.common.resources.http_msg_spec.ExternalInsEventMsg, the
+    coordinator-standalone "External Deployer" protocol):
+        {"event": "set"|"add"|"del",
+         "model_name": str (optional),
+         "dispatch_capabilities": "<one plan>",
+         "engine_type": "vllm",
+         "instances": [{"id": <int >=1>, "role": "prefill"|"decode",
+                        "endpoints": [{"id": <int >=0>, "address": "host:port"}]}]}
+
+    The schema is ``extra="forbid"``: job name, status, DP size and
+    multi-endpoint routing are NOT part of it — Motor derives them in
+    ExternalInsEventMsg.to_internal(). A request may not mix this shape with the
+    Controller-shaped InsEventMsg fields (``job_name``, ``endpoints`` as a dict).
     """
     host, port = split_address(address)
-    instance = {
-        "job_name": build_job_name(role, address, model_name),
-        "model_name": model_name or "unknown",
+    body = {
+        "event": event,
+        "dispatch_capabilities": get_dispatch_capability(),
         "engine_type": get_engine_type(),
-        "dispatch_capabilities": get_dispatch_capabilities(),
-        "id": instance_id,
-        "role": role,
-        "status": INSTANCE_STATUS_ACTIVE,
-        "enable_multi_endpoints": True,
-        "endpoints": {
-            host: {
-                "0": {
-                    "id": 0,
-                    "ip": host,
-                    "business_port": port,
-                    "status": ENDPOINT_STATUS_NORMAL,
-                    "headless": False,
-                }
+        "instances": [
+            {
+                "id": instance_id,
+                "role": role,
+                "endpoints": [{"id": 0, "address": format_address(host, port)}],
             }
-        },
+        ],
     }
-    return {"event": event, "instances": [instance]}
+    # Omitting model_name lets Motor probe every reachable DP's /v1/models and
+    # require them to agree; a multi-model engine must state it. Patio sends the
+    # name it resolved at registration time so that deregistration does not
+    # depend on a still-live engine (Motor skips its probe when the name is set).
+    if model_name:
+        body["model_name"] = model_name
+    return body
 
 
 def _build_health_check_endpoint(worker_info: dict) -> str:

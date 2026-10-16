@@ -11,10 +11,10 @@ from patio import envs
 from patio.topo.client.motor_topo_client import (
     MotorTopoClient,
     build_body,
-    build_job_name,
     derive_instance_id,
     detect_worker_type,
-    get_dispatch_capabilities,
+    format_address,
+    get_dispatch_capability,
     get_engine_type,
     get_motor_endpoint,
     get_worker_address,
@@ -132,6 +132,15 @@ def test_split_address_bare_host_defaults_port():
     assert split_address("10.0.0.1") == ("10.0.0.1", "8000")
 
 
+def test_split_address_bracketed_ipv6():
+    assert split_address("[2001:db8::1]:8200") == ("2001:db8::1", "8200")
+
+
+def test_split_address_bare_ipv6_is_host_only():
+    """rpartition would read the last hextet as the port; keep it whole."""
+    assert split_address("2001:db8::1") == ("2001:db8::1", "8000")
+
+
 def test_get_worker_address_prefers_explicit_instance(monkeypatch):
     monkeypatch.setenv("POD_IP", "10.0.0.8")
     assert get_worker_address({"instance": "custom-svc:8500", "port": 8500}) == "custom-svc:8500"
@@ -162,44 +171,61 @@ def test_get_worker_address_raises_without_any_source(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# build_body (InsEventMsg-compatible schema)
+# build_body (ExternalInsEventMsg: coordinator-standalone External Deployer)
 # ---------------------------------------------------------------------------
 
 def test_build_body_add():
     body = build_body(event="add", role="prefill", address="10.0.0.1:8000",
                       instance_id=1073741825, model_name="Qwen-7B")
-    # InsEventMsg: only event + instances at the top level
-    assert set(body.keys()) == {"event", "instances"}
+    # ExternalInsEventMsg: event + optional knobs + instances[]
+    assert set(body.keys()) == {"event", "model_name", "dispatch_capabilities",
+                                "engine_type", "instances"}
     assert body["event"] == "add"
+    assert body["model_name"] == "Qwen-7B"
+    assert body["engine_type"] == "vllm"
+    # a single plan, not a list: the external schema carries one enum value
+    assert body["dispatch_capabilities"] == "prefill_handoff_decode"
     assert len(body["instances"]) == 1
     inst = body["instances"][0]
+    assert set(inst.keys()) == {"id", "role", "endpoints"}
     assert inst["id"] == 1073741825
     assert inst["role"] == "prefill"
-    assert inst["job_name"] == "Qwen-7B-prefill-10.0.0.1-8000"
-    assert inst["model_name"] == "Qwen-7B"
-    assert inst["engine_type"] == "vllm"
-    assert inst["dispatch_capabilities"] == ["prefill_handoff_decode"]
-    assert inst["status"] == "active"
-    # endpoints: dict[pod_ip][ep_id] -> Endpoint{id, ip, business_port}
-    assert inst["endpoints"]["10.0.0.1"]["0"]["ip"] == "10.0.0.1"
-    assert inst["endpoints"]["10.0.0.1"]["0"]["business_port"] == "8000"
-    assert inst["endpoints"]["10.0.0.1"]["0"]["id"] == 0
+    # endpoints are a flat [{id, address}] list; Motor derives ip/port, job
+    # name, status and DP size in ExternalInsEventMsg.to_internal()
+    assert inst["endpoints"] == [{"id": 0, "address": "10.0.0.1:8000"}]
 
 
-def test_build_body_del_uses_unknown_model_when_missing():
-    """model_name defaults to 'unknown' so Motor's required-field validation
-    still passes for del (CLI uses the same fallback)."""
+def test_build_body_omits_model_name_when_unresolved():
+    """model_name is optional in the external schema: Motor then probes every
+    reachable DP /v1/models and requires them to agree. An unresolved name must
+    be left out rather than sent as a placeholder that cannot match a model."""
     body = build_body(event="del", role="decode", address="10.0.0.2:8000",
                       instance_id=1073741826)
     assert body["event"] == "del"
-    inst = body["instances"][0]
-    assert inst["model_name"] == "unknown"
-    assert inst["job_name"] == "unknown-decode-10.0.0.2-8000"
+    assert "model_name" not in body
 
 
-def test_build_job_name():
-    assert build_job_name("prefill", "10.0.0.1:8000", "Qwen-7B") == "Qwen-7B-prefill-10.0.0.1-8000"
-    assert build_job_name("decode", "10.0.0.2:8001", None) == "unknown-decode-10.0.0.2-8001"
+def test_build_body_never_mixes_controller_shape_fields():
+    """Motor classifies a payload by shape: Controller-shaped fields on an
+    instance (job_name, dict endpoints, status, ...) would route the event to
+    the InsEventMsg schema instead of the external one."""
+    inst = build_body("add", "prefill", "10.0.0.1:8000", 1, "m")["instances"][0]
+    for controller_only in ("job_name", "model_name", "engine_type",
+                            "dispatch_capabilities", "status",
+                            "enable_multi_endpoints"):
+        assert controller_only not in inst
+
+
+def test_build_body_brackets_ipv6_address():
+    body = build_body(event="add", role="prefill", address="[2001:db8::1]:8200",
+                      instance_id=7)
+    assert body["instances"][0]["endpoints"] == [{"id": 0, "address": "[2001:db8::1]:8200"}]
+
+
+def test_format_address():
+    assert format_address("10.0.0.1", "8000") == "10.0.0.1:8000"
+    assert format_address("demo-prefill-0.s-demo", "9000") == "demo-prefill-0.s-demo:9000"
+    assert format_address("2001:db8::1", "8200") == "[2001:db8::1]:8200"
 
 
 # ---------------------------------------------------------------------------
@@ -341,11 +367,15 @@ def test_register_posts_instances_refresh(mock_post, monkeypatch):
         url = call_args[0][0] if call_args[0] else call_args[1]["url"]
         assert "/instances/refresh" in url
         assert "demo-router-0.s-demo-router:9000" in url
-        # InsEventMsg body: event + instances[]
+        # ExternalInsEventMsg body: event + optional knobs + instances[]
         body = call_args[1]["json"]
         assert body["event"] == "add"
-        assert body["instances"][0]["model_name"] == "test-model"
+        assert body["model_name"] == "test-model"
         assert body["instances"][0]["id"] == client.instance_id
+        assert body["instances"][0]["role"] == "prefill"
+        assert body["instances"][0]["endpoints"] == [
+            {"id": 0, "address": "10.0.0.1:8000"}
+        ]
         # env-configured model name means no /v1/models probe
         model_urls = [c[0][0] for c in mock_get.call_args_list if "/v1/models" in c[0][0]]
         assert model_urls == []
@@ -389,15 +419,16 @@ def test_register_resolves_model_name_from_engine(mock_post, monkeypatch):
         assert model_urls[0] == "http://10.0.0.1:8000/v1/models"
 
         body = mock_post.call_args[1]["json"]
-        assert body["instances"][0]["model_name"] == "Qwen2.5-7B"
+        assert body["model_name"] == "Qwen2.5-7B"
         # cached for unregister after the engine dies
         assert client._model_name == "Qwen2.5-7B"
 
 
 @patch("patio.topo.client.motor_topo_client.requests.post")
-def test_register_uses_unknown_model_when_probe_fails(mock_post, monkeypatch):
-    """If the /v1/models probe fails, model_name falls back to 'unknown' so the
-    required field still validates; Motor matches by instance id/endpoints."""
+def test_register_omits_model_name_when_probe_fails(mock_post, monkeypatch):
+    """If the /v1/models probe fails, register() leaves model_name out: Motor
+    probes the reachable DPs itself. A placeholder name could not match any real
+    model, and Motor rejects a name the engines do not serve."""
     _set_motor_env(monkeypatch)
     monkeypatch.setenv("POD_IP", "10.0.0.1")
     reload(envs)
@@ -420,7 +451,7 @@ def test_register_uses_unknown_model_when_probe_fails(mock_post, monkeypatch):
         assert client.register("", {"type": "prefill", "port": 8000})
 
         body = mock_post.call_args[1]["json"]
-        assert body["instances"][0]["model_name"] == "unknown"
+        assert "model_name" not in body
         assert client._model_name is None
 
 
@@ -510,7 +541,7 @@ def test_register_deregisters_when_engine_becomes_unhealthy(mock_post, monkeypat
 
         # del carries the cached model name (engine is dead, no re-probe)
         del_body = mock_post.call_args_list[-1][1]["json"]
-        assert del_body["instances"][0]["model_name"] == "test-model"
+        assert del_body["model_name"] == "test-model"
 
 
 # ---------------------------------------------------------------------------
@@ -537,8 +568,9 @@ def test_unregister_posts_instance_del(mock_post, monkeypatch):
         call_kwargs = mock_post.call_args[1]
         body = call_kwargs["json"]
         assert body["event"] == "del"
-        # Motor requires model_name for del too; carried from env/cache
-        assert body["instances"][0]["model_name"] == "test-model"
+        # Motor needs a resolvable model_name for del too; carried from env/cache
+        # so that its own /v1/models probe is skipped
+        assert body["model_name"] == "test-model"
         assert client._registered is False
 
 
@@ -590,7 +622,7 @@ def test_unregister_carries_cached_model_name_after_engine_death(mock_post, monk
 
         body = mock_post.call_args[1]["json"]
         assert body["event"] == "del"
-        assert body["instances"][0]["model_name"] == "Qwen2.5-7B"
+        assert body["model_name"] == "Qwen2.5-7B"
 
 
 # ---------------------------------------------------------------------------
@@ -708,7 +740,7 @@ def test_unregister_recovery_after_earlier_failure(mock_post, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# payload knobs Motor derives itself when the Controller registers an instance
+# payload knobs the External Deployer protocol constrains
 # ---------------------------------------------------------------------------
 
 def test_detect_worker_type_normalizes_case_and_whitespace():
@@ -716,16 +748,11 @@ def test_detect_worker_type_normalizes_case_and_whitespace():
     assert detect_worker_type({"worker_type": "DECODE"}) == "decode"
 
 
-def test_detect_worker_type_accepts_legacy_both_alias():
-    """Motor maps the legacy role name "both" onto PDRole.union."""
-    assert detect_worker_type({"type": "both"}) == "both"
-
-
-def test_detect_worker_type_rejects_role_motor_cannot_map():
-    """Motor validates the role only while inserting into its pools, so an
-    unmappable role would partially apply a request and answer a bare 400.
-    Reject it before any HTTP call instead."""
-    for bad_role in ("P", "D", "Prefill-Decode", "router"):
+def test_detect_worker_type_rejects_roles_a_sidecar_cannot_register():
+    """ExternalInstance.role only accepts prefill/decode, so Motor answers a bare
+    400 ("unsupported external instance role") for the Controller-only roles.
+    Reject them before any HTTP call instead."""
+    for bad_role in ("encode", "union", "both", "P", "D", "Prefill-Decode", "router"):
         try:
             detect_worker_type({"type": bad_role})
         except ValueError as exc:
@@ -746,43 +773,57 @@ def test_detect_worker_type_still_requires_a_role():
 def test_get_engine_type_defaults_to_vllm(monkeypatch):
     monkeypatch.delenv("MOTOR_ENGINE_TYPE", raising=False)
     assert get_engine_type() == "vllm"
-    assert build_body("add", "prefill", "10.0.0.1:8000", 1, "m")["instances"][0]["engine_type"] == "vllm"
+    assert build_body("add", "prefill", "10.0.0.1:8000", 1, "m")["engine_type"] == "vllm"
 
 
-def test_get_engine_type_override_and_validation(monkeypatch):
-    monkeypatch.setenv("MOTOR_ENGINE_TYPE", " SGLang ")
-    assert get_engine_type() == "sglang"
+def test_get_engine_type_rejects_engines_the_external_protocol_cannot_serve(monkeypatch):
+    """The External Deployer protocol is vllm-only ("currently supports
+    engine_type='vllm' only"); sglang belongs to the Controller-shaped schema."""
+    for engine in (" SGLang ", "tgi"):
+        monkeypatch.setenv("MOTOR_ENGINE_TYPE", engine)
+        try:
+            get_engine_type()
+        except ValueError as exc:
+            assert "invalid MOTOR_ENGINE_TYPE" in str(exc)
+        else:
+            raise AssertionError(f"engine {engine!r} must be rejected")
 
-    monkeypatch.setenv("MOTOR_ENGINE_TYPE", "tgi")
-    try:
-        get_engine_type()
-    except ValueError as exc:
-        assert "invalid MOTOR_ENGINE_TYPE" in str(exc)
-    else:
-        raise AssertionError("unsupported engine type must raise")
 
-
-def test_dispatch_capabilities_default_to_vllm_handoff(monkeypatch):
+def test_dispatch_capability_defaults_to_vllm_handoff(monkeypatch):
     monkeypatch.delenv("MOTOR_DISPATCH_CAPABILITIES", raising=False)
-    assert get_dispatch_capabilities() == ["prefill_handoff_decode"]
+    assert get_dispatch_capability() == "prefill_handoff_decode"
     body = build_body("add", "decode", "10.0.0.2:8000", 2, "m")
-    assert body["instances"][0]["dispatch_capabilities"] == ["prefill_handoff_decode"]
+    assert body["dispatch_capabilities"] == "prefill_handoff_decode"
 
 
-def test_dispatch_capabilities_override(monkeypatch):
-    monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", "concurrent_engine_sync, decode_colocation")
-    assert get_dispatch_capabilities() == ["concurrent_engine_sync", "decode_colocation"]
+def test_dispatch_capability_override(monkeypatch):
+    monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", " concurrent_engine_sync ")
+    assert get_dispatch_capability() == "concurrent_engine_sync"
 
     # empty override == "let Motor assume the vLLM default" (HANDOFF)
-    monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", "  ")
-    assert get_dispatch_capabilities() == []
+    for empty in ("  ", ""):
+        monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", empty)
+        assert get_dispatch_capability() == "prefill_handoff_decode"
+
+
+def test_dispatch_capability_rejects_multiple_or_unknown_plans(monkeypatch):
+    """The external schema carries exactly one plan from a closed set: a list
+    (Controller shape) or a plan Motor does not implement is rejected server-side."""
+    for raw in ("concurrent_engine_sync, decode_colocation", "decode_colocation"):
+        monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", raw)
+        try:
+            get_dispatch_capability()
+        except ValueError as exc:
+            assert "MOTOR_DISPATCH_CAPABILITIES" in str(exc)
+        else:
+            raise AssertionError(f"MOTOR_DISPATCH_CAPABILITIES={raw!r} should have been rejected")
 
 
 def test_build_body_is_self_consistent_for_deregistration():
-    """del must carry the same identity as add (Motor matches role + endpoint
-    identity, and only needs model_name to avoid its own engine probe)."""
-    add = build_body("add", "prefill", "10.0.0.1:8000", 42, "m")["instances"][0]
-    delete = build_body("del", "prefill", "10.0.0.1:8000", 42, "m")["instances"][0]
-    assert add["id"] == delete["id"]
-    assert add["role"] == delete["role"]
-    assert add["endpoints"] == delete["endpoints"]
+    """del must carry the same identity as add: Motor matches the instance by
+    role/endpoint identity, and needs model_name only to skip its own probe."""
+    add = build_body("add", "prefill", "10.0.0.1:8000", 42, "m")
+    delete = build_body("del", "prefill", "10.0.0.1:8000", 42, "m")
+    assert {k: v for k, v in add.items() if k != "event"} == {
+        k: v for k, v in delete.items() if k != "event"
+    }

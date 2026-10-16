@@ -90,7 +90,8 @@ with the proxy using `/instances/add`.
 For MindIE Motor Coordinator (standalone deployment) registration, set
 `TOPO_TYPE` to `Motor`. The Coordinator management endpoint derives from the
 same `ROUTER_ROLE_NAME` / `ROUTER_PORT` DNS shape, and Patio registers /
-deregisters the engine instance through `/instances/refresh`:
+deregisters the engine instance through `/instances/refresh` using the
+Coordinator's External Deployer event schema (`ExternalInsEventMsg`):
 
 ```yaml
 env:
@@ -100,23 +101,25 @@ env:
     value: "router"          # the Motor Coordinator management service
   - name: ROUTER_PORT
     value: "1026"            # Motor management API port
-  - name: MOTOR_MODEL_NAME   # optional; else resolved from engine /v1/models
+  - name: MOTOR_MODEL_NAME   # optional; else Motor probes the engine /v1/models
     value: "Qwen2.5-7B"
   - name: MOTOR_MGMT_API_KEY_FILE  # optional; path to the management API key file
     value: "/etc/patio/mgmt-key"
-  - name: MOTOR_ENGINE_TYPE        # optional; engine family advertised to Motor
+  - name: MOTOR_ENGINE_TYPE        # optional; only vllm is supported by the schema
     value: "vllm"
-  - name: MOTOR_DISPATCH_CAPABILITIES  # optional; P/D plan, empty = Motor's vLLM HANDOFF default
+  - name: MOTOR_DISPATCH_CAPABILITIES  # optional; one plan, empty = Motor's vLLM HANDOFF default
     value: "prefill_handoff_decode"
 ```
 
 The worker's P/D role is taken from `type`/`worker_type` in the instance info
-(`prefill` or `decode`, validated against Motor's accepted roles), and the
-endpoint address from the `instance` field, `POD_IP`, or the RBG headless DNS. On
-every heartbeat the engine `/health` is probed: while the endpoint is healthy
-Patio keeps the instance registered (event=add); once the endpoint fails, Patio
-sends event=del so the Coordinator stops routing traffic to the dead (P or D)
-instance — no orphaned registration is left behind during multi-DP operation.
+(`prefill` or `decode` — the schema has no encode/union role), and the endpoint
+address from the `instance` field, `POD_IP`, or the RBG headless DNS. Patio sends
+just the instance id, role and endpoint address; Motor derives the job name, DP
+size and multi-endpoint routing from that. On every heartbeat the engine
+`/health` is probed: while the endpoint is healthy Patio keeps the instance
+registered (event=add); once the endpoint fails, Patio sends event=del so the
+Coordinator stops routing traffic to the dead (P or D) instance — no orphaned
+registration is left behind during multi-DP operation.
 
 Deregistration on `SIGTERM`/`SIGINT` is bounded by `MOTOR_UNREGISTER_DEADLINE`
 (default 10s) so that a terminating pod is never held up by an unreachable
@@ -187,10 +190,10 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `ROLE_NAME` | RBG role name | `None` |
 | `ROLE_INDEX` | RBG role index | `None` |
 | `HEARTBEAT_INTERVAL` | Topology heartbeat interval (seconds) | `30` |
-| `MOTOR_MODEL_NAME` | Model name for Motor registration; if unset, resolved from the engine `/v1/models` | `None` |
+| `MOTOR_MODEL_NAME` | Model name for Motor registration; if unset, Motor probes the engine `/v1/models` | `None` |
 | `MOTOR_MGMT_API_KEY_FILE` | Path to the Motor management API key file (optional) | `None` |
-| `MOTOR_ENGINE_TYPE` | Engine family advertised to Motor (`vllm` / `sglang`) | `vllm` |
-| `MOTOR_DISPATCH_CAPABILITIES` | Comma-separated P/D dispatch plans; empty means Motor's vLLM HANDOFF default | `prefill_handoff_decode` |
+| `MOTOR_ENGINE_TYPE` | Engine family advertised to Motor (the External Deployer schema accepts `vllm` only) | `vllm` |
+| `MOTOR_DISPATCH_CAPABILITIES` | The single P/D dispatch plan (`prefill_handoff_decode` / `concurrent_engine_sync`); empty means Motor's vLLM HANDOFF default | `prefill_handoff_decode` |
 | `MOTOR_UNREGISTER_DEADLINE` | Total budget for deregistration at shutdown (seconds) | `10` |
 | `MOTOR_UNREGISTER_INTERVAL` | Interval between shutdown deregistration attempts (seconds) | `1` |
 | `MOTOR_UNREGISTER_TIMEOUT` | Per-request timeout during shutdown deregistration (seconds) | `3` |
