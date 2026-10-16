@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # @Author: zibai.gj
 from patio.topo.client.base_topo_client import GroupTopoClient
+from patio.topo.client.motor_topo_client import MotorTopoClient
 from patio.topo.client.sgl_topo_client import SGLangGroupTopoClient
 from patio.topo.client.vllm_topo_client import VLLMProxyTopoClient
 from patio.topo.server.base_topo_server import GroupTopoServer
@@ -12,6 +13,8 @@ def create_topo_client(topo_type: str, worker_info: dict) -> GroupTopoClient:
         return SGLangGroupTopoClient(worker_info)
     elif topo_type.lower() == "vllm":
         return VLLMProxyTopoClient(worker_info)
+    elif topo_type.lower() == "motor":
+        return MotorTopoClient(worker_info)
     else:
         raise ValueError(f"Invalid topo type: {topo_type}")
 

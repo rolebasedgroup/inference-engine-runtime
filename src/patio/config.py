@@ -17,5 +17,6 @@ DEFAULT_PATIO_PORT = 9091
 # Group Topo
 SGLang = "SGLang"
 vLLM = "vLLM"
+Motor = "Motor"
 
-SUPPORTED_TOPO_TYPES = [SGLang, vLLM]
+SUPPORTED_TOPO_TYPES = [SGLang, vLLM, Motor]

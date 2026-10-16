@@ -31,6 +31,19 @@ TOPO_REGISTER_TIMEOUT = float(os.getenv("TOPO_REGISTER_TIMEOUT", "10"))
 SCHEDULER_ROLE_NAME = os.getenv("SCHEDULER_ROLE_NAME")
 _topo_register_endpoint = os.getenv("TOPO_REGISTER_ENDPOINT")
 
+# MindIE Motor Coordinator integration (Motor is a routing component like the
+# SGLang router / vLLM proxy; its endpoint derives from ROUTER_ROLE_NAME/ROUTER_PORT)
+MOTOR_MGMT_API_KEY_FILE = os.getenv("MOTOR_MGMT_API_KEY_FILE")
+MOTOR_MODEL_NAME = os.getenv("MOTOR_MODEL_NAME")
+
+# Deregistration budget. unregister() runs inside the SIGTERM/SIGINT handler, so
+# it is bounded by a deadline instead of the 60x3s registration retry budget:
+# blocking there delays pod termination for minutes. Must stay well below the
+# Kubernetes terminationGracePeriodSeconds.
+MOTOR_UNREGISTER_DEADLINE = float(os.getenv("MOTOR_UNREGISTER_DEADLINE", "10"))
+MOTOR_UNREGISTER_INTERVAL = float(os.getenv("MOTOR_UNREGISTER_INTERVAL", "1"))
+MOTOR_UNREGISTER_TIMEOUT = float(os.getenv("MOTOR_UNREGISTER_TIMEOUT", "3"))
+
 # Patio config
 HEALTH_CHECK_INTERVAL = os.getenv("HEALTH_CHECK_INTERVAL", 300)
 HEARTBEAT_INTERVAL = os.getenv("HEARTBEAT_INTERVAL", 10)
