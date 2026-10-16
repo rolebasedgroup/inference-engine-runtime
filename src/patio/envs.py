@@ -31,6 +31,11 @@ TOPO_REGISTER_TIMEOUT = float(os.getenv("TOPO_REGISTER_TIMEOUT", "10"))
 SCHEDULER_ROLE_NAME = os.getenv("SCHEDULER_ROLE_NAME")
 _topo_register_endpoint = os.getenv("TOPO_REGISTER_ENDPOINT")
 
+# MindIE Motor Coordinator integration (Motor is a routing component like the
+# SGLang router / vLLM proxy; its endpoint derives from ROUTER_ROLE_NAME/ROUTER_PORT)
+MOTOR_MGMT_API_KEY_FILE = os.getenv("MOTOR_MGMT_API_KEY_FILE")
+MOTOR_MODEL_NAME = os.getenv("MOTOR_MODEL_NAME")
+
 # Patio config
 HEALTH_CHECK_INTERVAL = os.getenv("HEALTH_CHECK_INTERVAL", 300)
 HEARTBEAT_INTERVAL = os.getenv("HEARTBEAT_INTERVAL", 10)

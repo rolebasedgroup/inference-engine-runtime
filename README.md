@@ -87,6 +87,33 @@ For vLLM proxy registration, set `TOPO_TYPE` to `vLLM` and point
 `ROUTER_ROLE_NAME` / `ROUTER_PORT` at the proxy service. Patio registers workers
 with the proxy using `/instances/add`.
 
+For MindIE Motor Coordinator (standalone deployment) registration, set
+`TOPO_TYPE` to `Motor`. The Coordinator management endpoint derives from the
+same `ROUTER_ROLE_NAME` / `ROUTER_PORT` DNS shape, and Patio registers /
+deregisters the engine instance through `/instances/refresh`:
+
+```yaml
+env:
+  - name: TOPO_TYPE
+    value: "Motor"
+  - name: ROUTER_ROLE_NAME
+    value: "router"          # the Motor Coordinator management service
+  - name: ROUTER_PORT
+    value: "1026"            # Motor management API port
+  - name: MOTOR_MODEL_NAME   # optional; else resolved from engine /v1/models
+    value: "Qwen2.5-7B"
+  - name: MOTOR_MGMT_API_KEY_FILE  # optional; path to the management API key file
+    value: "/etc/patio/mgmt-key"
+```
+
+The worker's P/D role is taken from `type`/`worker_type` in the instance info
+(`prefill` or `decode`), and the endpoint address from the `instance` field,
+`POD_IP`, or the RBG headless DNS. On every heartbeat the engine `/health` is
+probed: while the endpoint is healthy Patio keeps the instance registered
+(event=add); once the endpoint fails, Patio sends event=del so the Coordinator
+stops routing traffic to the dead (P or D) instance — no orphaned registration
+is left behind during multi-DP operation.
+
 ## Quick Start
 
 ### Prerequisites
@@ -140,9 +167,9 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `INFERENCE_ENGINE` | Inference engine type (`sglang` or `vllm`) | `sglang` |
 | `INFERENCE_ENGINE_VERSION` | Engine version | `v0.5.3` |
 | `INFERENCE_ENGINE_ENDPOINT` | Engine endpoint URL | `http://localhost:8000` |
-| `TOPO_TYPE` | Topology type (`SGLang`, `vLLM`, or `None`) | `None` |
-| `ROUTER_ROLE_NAME` | RBG role name for the topology router or proxy | `None` |
-| `ROUTER_PORT` | Port for the topology router or proxy | `None` |
+| `TOPO_TYPE` | Topology type (`SGLang`, `vLLM`, `Motor`, or `None`) | `None` |
+| `ROUTER_ROLE_NAME` | RBG role name for the topology router, proxy, or Motor Coordinator | `None` |
+| `ROUTER_PORT` | Port for the topology router, proxy, or Motor Coordinator | `None` |
 | `TOPO_CONNECT_TIMEOUT` | Connection timeout for topology HTTP requests (seconds) | `3` |
 | `TOPO_HEALTH_CHECK_TIMEOUT` | Read timeout for engine health checks (seconds) | `30` |
 | `TOPO_REGISTER_TIMEOUT` | Read timeout for topology register and unregister requests (seconds) | `10` |
@@ -150,6 +177,8 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `ROLE_NAME` | RBG role name | `None` |
 | `ROLE_INDEX` | RBG role index | `None` |
 | `HEARTBEAT_INTERVAL` | Topology heartbeat interval (seconds) | `30` |
+| `MOTOR_MODEL_NAME` | Model name for Motor registration; if unset, resolved from the engine `/v1/models` | `None` |
+| `MOTOR_MGMT_API_KEY_FILE` | Path to the Motor management API key file (optional) | `None` |
 
 ## Usage with RoleBasedGroup
 
