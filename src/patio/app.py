@@ -159,7 +159,8 @@ def main():
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PATIO_PORT, help="Port to listen on"
     )
-    parser.add_argument("--instance-info", type=str, default="", help="instance info")
+    parser.add_argument("--instance-info", type=str, default="",
+                        help='worker instance JSON: {"topo_type": ..., "data": {...}}; see doc/topo.md')
     parser.add_argument(
         "--scrape-engine-metrics",
         type=bool,

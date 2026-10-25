@@ -12,8 +12,8 @@ from patio import envs
 from patio.config import EXIT_EVENT
 from patio.topo.client.motor_topo_client import (
     MotorTopoClient,
-    _build_health_check_endpoint,
     build_body,
+    derive_endpoint_ports,
     derive_instance_id,
     detect_worker_type,
     format_address,
@@ -21,6 +21,9 @@ from patio.topo.client.motor_topo_client import (
     get_engine_type,
     get_motor_endpoint,
     get_worker_address,
+    get_worker_endpoints,
+    normalize_endpoint,
+    sort_endpoints,
     split_address,
     STANDALONE_ID_NAMESPACE,
     STANDALONE_ID_MASK,
@@ -174,9 +177,10 @@ def test_get_worker_address_brackets_ipv6_pod_ip(monkeypatch):
     assert get_worker_address({"port": 8102}) == "[2001:db8::1]:8102"
 
 
-def test_health_check_endpoint_brackets_ipv6_pod_ip(monkeypatch):
+def test_get_worker_endpoints_brackets_ipv6_pod_ip(monkeypatch):
     monkeypatch.setenv("POD_IP", "2001:db8::1")
-    assert _build_health_check_endpoint({"port": 8102}) == "[2001:db8::1]:8102"
+    monkeypatch.setattr(envs, "MOTOR_INSTANCE_ENDPOINTS", None)
+    assert get_worker_endpoints({"port": 8102}) == ["[2001:db8::1]:8102"]
 
 
 def test_get_worker_address_raises_without_any_source(monkeypatch):
@@ -195,7 +199,7 @@ def test_get_worker_address_raises_without_any_source(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_build_body_add():
-    body = build_body(event="add", role="prefill", address="10.0.0.1:8000",
+    body = build_body(event="add", role="prefill", endpoints="10.0.0.1:8000",
                       instance_id=1073741825, model_name="Qwen-7B")
     # ExternalInsEventMsg: event + optional knobs + instances[]
     assert set(body.keys()) == {"event", "model_name", "dispatch_capabilities",
@@ -219,7 +223,7 @@ def test_build_body_omits_model_name_when_unresolved():
     """model_name is optional in the external schema: Motor then probes every
     reachable DP /v1/models and requires them to agree. An unresolved name must
     be left out rather than sent as a placeholder that cannot match a model."""
-    body = build_body(event="del", role="decode", address="10.0.0.2:8000",
+    body = build_body(event="del", role="decode", endpoints="10.0.0.2:8000",
                       instance_id=1073741826)
     assert body["event"] == "del"
     assert "model_name" not in body
@@ -237,9 +241,263 @@ def test_build_body_never_mixes_controller_shape_fields():
 
 
 def test_build_body_brackets_ipv6_address():
-    body = build_body(event="add", role="prefill", address="[2001:db8::1]:8200",
+    body = build_body(event="add", role="prefill", endpoints="[2001:db8::1]:8200",
                       instance_id=7)
     assert body["instances"][0]["endpoints"] == [{"id": 0, "address": "[2001:db8::1]:8200"}]
+
+
+# ---------------------------------------------------------------------------
+# multi-endpoint instances (the production P/D shape)
+#
+# Motor's External Deployer schema takes a LIST of endpoints per instance and
+# derives dp_size = len(endpoints) plus the multi-endpoint routing table in
+# ExternalInsEventMsg.to_internal(). A DeepSeek-V4-Flash instance on one 16-NPU
+# Atlas 800I A3 node is dp4 x tp4 = 4 prefill endpoints (ports 7100, 7102, 7104,
+# 7106) or dp16 x tp1 = 16 decode endpoints (7100 .. 7130 step 2), because the
+# official launch script starts one vLLM API server per DP rank
+# (vllm-ascend DeepSeek-V4-Flash tutorial, launch_online_dp.py).
+# ---------------------------------------------------------------------------
+
+# Instance ids the same groups derive with Motor's own CLI
+# (python3 -c "from motor.coordinator.register import derive_instance_id; ..."),
+# i.e. crc32("role|ip:port|ip:port|...") | 0x40000000:
+#   prefill 10.0.0.1:{7100,7102,7104,7106} -> 1147345019
+#   decode  10.0.0.2:{7100..7130 step 2}    -> 1872492629
+MOTOR_CLI_PREFILL_4EP_ID = 1147345019
+MOTOR_CLI_DECODE_16EP_ID = 1872492629
+
+A3_PREFILL_PORTS = [7100, 7102, 7104, 7106]
+A3_DECODE_PORTS = [7100 + 2 * index for index in range(16)]
+
+
+def test_build_body_reports_every_dp_endpoint_of_a_prefill_instance():
+    """One endpoint per DP rank, ids 0..N-1: Motor turns this into dp_size=4."""
+    addresses = ["10.0.0.1:%d" % port for port in A3_PREFILL_PORTS]
+    body = build_body(event="add", role="prefill", endpoints=addresses,
+                      instance_id=MOTOR_CLI_PREFILL_4EP_ID, model_name="dsv4")
+    endpoints = body["instances"][0]["endpoints"]
+    assert endpoints == [
+        {"id": index, "address": address} for index, address in enumerate(addresses)
+    ]
+    assert len(endpoints) == 4
+
+
+def test_build_body_reports_every_dp_endpoint_of_a_decode_instance():
+    addresses = ["10.0.0.2:%d" % port for port in A3_DECODE_PORTS]
+    body = build_body(event="add", role="decode", endpoints=addresses,
+                      instance_id=MOTOR_CLI_DECODE_16EP_ID, model_name="dsv4")
+    endpoints = body["instances"][0]["endpoints"]
+    assert [entry["address"] for entry in endpoints] == addresses
+    assert [entry["id"] for entry in endpoints] == list(range(16))
+
+
+def test_build_body_is_order_independent():
+    """Motor's CLI sorts a group by (ip, int(port)) before deriving the id, so
+    the same physical group must produce the same body whatever order the
+    deployment reports it in."""
+    addresses = ["10.0.0.1:%d" % port for port in A3_PREFILL_PORTS]
+    shuffled = [addresses[2], addresses[0], addresses[3], addresses[1]]
+    assert build_body("add", "prefill", shuffled, 1) == build_body(
+        "add", "prefill", addresses, 1
+    )
+    assert derive_instance_id("prefill", shuffled) == derive_instance_id(
+        "prefill", addresses
+    )
+
+
+def test_build_body_accepts_dict_endpoint_entries():
+    """A deployment may pass its own inventory records instead of bare strings."""
+    body = build_body(
+        event="add",
+        role="decode",
+        endpoints=[
+            {"ip": "10.0.0.2", "business_port": "7100"},
+            {"address": "10.0.0.2:7102"},
+        ],
+        instance_id=1,
+    )
+    assert body["instances"][0]["endpoints"] == [
+        {"id": 0, "address": "10.0.0.2:7100"},
+        {"id": 1, "address": "10.0.0.2:7102"},
+    ]
+
+
+def test_build_body_rejects_duplicate_endpoints():
+    """Motor rejects an instance with two identical (host, port) endpoints with
+    a 400; fail locally with an actionable message instead."""
+    import pytest
+    with pytest.raises(ValueError, match="duplicate endpoint address 10.0.0.1:8000"):
+        build_body("add", "prefill", ["10.0.0.1:8000", "10.0.0.1:8000"], 1)
+
+
+def test_derive_instance_id_multi_endpoint_matches_motor_cli():
+    """The id covers the whole group, not just the first endpoint, so a
+    multi-endpoint instance is the instance Motor's CLI would register."""
+    prefill = derive_instance_id(
+        "prefill", ["10.0.0.1:%d" % port for port in A3_PREFILL_PORTS]
+    )
+    decode = derive_instance_id(
+        "decode", ["10.0.0.2:%d" % port for port in A3_DECODE_PORTS]
+    )
+    assert prefill == MOTOR_CLI_PREFILL_4EP_ID
+    assert decode == MOTOR_CLI_DECODE_16EP_ID
+    # ...and it differs from the single-endpoint id of the same first endpoint,
+    # which is exactly the bug this fixes: a one-endpoint registration is not
+    # the same instance as the dp_size=4 group.
+    assert prefill != derive_instance_id("prefill", "10.0.0.1:7100")
+    assert decode != derive_instance_id("decode", "10.0.0.2:7100")
+
+
+def test_derive_endpoint_ports_matches_motor_node_manager():
+    """Mirror of motor/config/node_manager.py::_generate_endpoint_ports:
+    endpoint_num = min(dp_size, device_num // local_world_size), ports step 2."""
+    # DeepSeek-V4-Flash A3 典配 (Motor user_config.json: 16 NPUs per pod)
+    assert derive_endpoint_ports(4, 4, 16) == ["10000", "10002", "10004", "10006"]
+    assert derive_endpoint_ports(16, 1, 16) == [
+        str(10000 + 2 * index) for index in range(16)
+    ]
+    # dp larger than the node's DP capacity: capped by device_num // local
+    assert derive_endpoint_ports(8, 4, 16) == ["10000", "10002", "10004", "10006"]
+    # base_port / port_step override
+    assert derive_endpoint_ports(2, 8, 16, base_port=9000, port_step=1) == ["9000", "9001"]
+
+
+def test_derive_endpoint_ports_rejects_impossible_configurations():
+    import pytest
+    with pytest.raises(ValueError, match="dp_size must be >= 1"):
+        derive_endpoint_ports(0, 1, 16)
+    with pytest.raises(ValueError, match="local_world_size must be >= 1"):
+        derive_endpoint_ports(4, 0, 16)
+    with pytest.raises(ValueError, match="smaller than one DP rank"):
+        derive_endpoint_ports(4, 16, 8)
+
+
+def test_get_worker_endpoints_explicit_group(monkeypatch):
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    endpoints = get_worker_endpoints(
+        {"type": "prefill", "endpoints": ["10.0.0.1:7104", "10.0.0.1:7100",
+                                          "10.0.0.1:7102", "10.0.0.1:7106"]}
+    )
+    assert endpoints == ["10.0.0.1:7100", "10.0.0.1:7102",
+                         "10.0.0.1:7104", "10.0.0.1:7106"]
+
+
+def test_get_worker_endpoints_group_may_span_pods(monkeypatch):
+    """Motor keys endpoints by ip, so one instance may cover several pods
+    (Motor's A2 典配 spans 2 pods per instance; SGLang hybrid uses nnodes=2)."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    assert get_worker_endpoints(
+        {"type": "decode", "endpoints": ["10.0.0.9:7100", "10.0.0.1:7100"]}
+    ) == ["10.0.0.1:7100", "10.0.0.9:7100"]
+
+
+def test_get_worker_endpoints_env_fallback(monkeypatch):
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    monkeypatch.setenv("MOTOR_INSTANCE_ENDPOINTS", "10.0.0.1:7102, 10.0.0.1:7100")
+    reload(envs)
+    assert get_worker_endpoints({"type": "decode"}) == [
+        "10.0.0.1:7100", "10.0.0.1:7102"
+    ]
+
+
+def test_get_worker_endpoints_from_ports(monkeypatch):
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    assert get_worker_endpoints({"type": "prefill", "ports": [7102, 7100]}) == [
+        "10.0.0.1:7100", "10.0.0.1:7102"
+    ]
+
+
+def test_get_worker_endpoints_from_parallel_config_when_opted_in(monkeypatch):
+    """dp_size + device_num + local_world_size are enough to derive the ports
+    with Motor's own convention — but only behind the explicit opt-in, because
+    an internal-LB instance with dp4 still exposes one routable endpoint."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    endpoints = get_worker_endpoints({
+        "type": "decode",
+        "derive_endpoints": True,
+        "parallel_config": {"dp_size": 16, "tp_size": 1},
+        "device_num": 16,
+        "base_port": 7100,
+    })
+    assert endpoints == ["10.0.0.1:%d" % port for port in A3_DECODE_PORTS]
+
+
+def test_get_worker_endpoints_does_not_derive_without_opt_in(monkeypatch):
+    """Q1: rank 0 is the complete answer for internal-LB topologies. A
+    parallel_config alone must not turn dp4 into four endpoints."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    assert get_worker_endpoints({
+        "type": "prefill",
+        "parallel_config": {"dp_size": 4, "tp_size": 4},
+        "device_num": 16,
+        "base_port": 7100,
+    }) == ["10.0.0.1:8000"]
+
+
+def test_get_worker_endpoints_derive_switch_from_env(monkeypatch):
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    monkeypatch.setenv("MOTOR_DERIVE_ENDPOINTS", "true")
+    reload(envs)
+    assert get_worker_endpoints({
+        "type": "prefill",
+        "parallel_config": {"dp_size": 2, "tp_size": 8},
+        "device_num": 16,
+        "base_port": 7100,
+    }) == ["10.0.0.1:7100", "10.0.0.1:7102"]
+
+
+def test_get_worker_endpoints_derive_requires_dp_and_device(monkeypatch):
+    import pytest
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    with pytest.raises(ValueError, match="derive_endpoints requires"):
+        get_worker_endpoints({"type": "prefill", "derive_endpoints": True})
+
+
+def test_get_worker_endpoints_single_endpoint_stays_compatible(monkeypatch):
+    """The original contract (one instance/port per sidecar) still works and
+    yields a one-endpoint instance."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    assert get_worker_endpoints({"type": "prefill", "port": 8000}) == ["10.0.0.1:8000"]
+    assert get_worker_endpoints(
+        {"type": "prefill", "instance": "custom-svc:8500"}
+    ) == ["custom-svc:8500"]
+
+
+def test_get_worker_endpoints_rejects_empty_group(monkeypatch):
+    import pytest
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    with pytest.raises(ValueError, match="non-empty list"):
+        get_worker_endpoints({"type": "prefill", "endpoints": []})
+
+
+def test_normalize_and_sort_endpoints_helpers():
+    assert normalize_endpoint("10.0.0.1:8000") == "10.0.0.1:8000"
+    assert normalize_endpoint({"address": "[2001:db8::1]:8200"}) == "[2001:db8::1]:8200"
+    assert normalize_endpoint({"host": "svc-a", "port": 8200}) == "svc-a:8200"
+    assert normalize_endpoint({"ip": "10.0.0.1"}) == "10.0.0.1:8000"
+    # same key as Motor's CLI: (ip, int(port)) — ip is compared as a STRING, so
+    # 10.0.0.10 sorts before 10.0.0.2 exactly as it does in register.py
+    assert sort_endpoints(["10.0.0.10:8000", "10.0.0.2:8000", "10.0.0.2:9000"]) == [
+        "10.0.0.10:8000", "10.0.0.2:8000", "10.0.0.2:9000"
+    ]
 
 
 def test_format_address():
@@ -261,7 +519,7 @@ def test_init_prefill(monkeypatch):
         {"type": "prefill", "port": 8000}
     )
     assert client.role == "prefill"
-    assert client.address == "10.0.0.1:8000"
+    assert client.endpoints == ["10.0.0.1:8000"]
     assert client.instance_id >= STANDALONE_ID_NAMESPACE
     assert client._registered is False
 
@@ -286,7 +544,25 @@ def test_init_uses_explicit_instance(monkeypatch):
     client = MotorTopoClient(
         {"type": "prefill", "instance": "custom-svc:8500", "port": 8500}
     )
-    assert client.address == "custom-svc:8500"
+    assert client.endpoints == ["custom-svc:8500"]
+
+
+def test_init_multi_endpoint_instance(monkeypatch):
+    """A dp4 x tp4 prefill sidecar: the instance id covers the whole endpoint
+    group, and the health probe stays local (POD_IP) on the first DP port."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+
+    client = MotorTopoClient({
+        "type": "prefill",
+        "endpoints": ["10.0.0.1:%d" % port for port in A3_PREFILL_PORTS],
+    })
+    assert client.endpoints == ["10.0.0.1:%d" % port for port in A3_PREFILL_PORTS]
+    assert client.endpoints[0] == "10.0.0.1:7100"
+    assert client.instance_id == MOTOR_CLI_PREFILL_4EP_ID
+    assert client.health_check_endpoints == client.endpoints
+    assert client._registered is False
 
 
 def test_init_raises_without_worker_type(monkeypatch):
@@ -350,6 +626,76 @@ def test_wait_engine_ready_fails_on_non_200(mock_get, monkeypatch):
     with _patch_retry():
         client = MotorTopoClient({"type": "prefill", "port": 8000})
         assert client.wait_engine_ready({"port": 8000}) is False
+
+
+@patch("patio.topo.client.motor_topo_client.requests.get")
+def test_engine_healthy_probes_every_dp_endpoint(mock_get, monkeypatch):
+    """The gate covers the whole DP group: Motor rejects the instance when any
+    DP is unreachable, so probing only the local rank is not enough."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+
+    probed = []
+
+    def _get(url, timeout=None):
+        probed.append(url)
+        response = MagicMock()
+        response.status_code = 200
+        return response
+
+    mock_get.side_effect = _get
+
+    endpoints = ["10.0.0.1:%d" % port for port in A3_PREFILL_PORTS]
+    client = MotorTopoClient({"type": "prefill", "endpoints": endpoints})
+    assert client._engine_healthy({}) is True
+    assert sorted(probed) == sorted(
+        "http://%s/health" % endpoint for endpoint in endpoints
+    )
+
+
+@patch("patio.topo.client.motor_topo_client.requests.get")
+def test_engine_healthy_fails_when_one_dp_endpoint_is_down(mock_get, monkeypatch):
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+
+    def _get(url, timeout=None):
+        response = MagicMock()
+        response.status_code = 503 if url == "http://10.0.0.1:7104/health" else 200
+        return response
+
+    mock_get.side_effect = _get
+
+    client = MotorTopoClient({
+        "type": "prefill",
+        "endpoints": ["10.0.0.1:%d" % port for port in A3_PREFILL_PORTS],
+    })
+    assert client._engine_healthy({}) is False
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+@patch("patio.topo.client.motor_topo_client.requests.get")
+def test_register_skips_add_when_one_dp_endpoint_is_down(mock_get, mock_post, monkeypatch):
+    """A partially dead group is not registered at all: Motor would reject it."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+
+    def _get(url, timeout=None):
+        response = MagicMock()
+        response.status_code = 503 if url == "http://10.0.0.1:7104/health" else 200
+        return response
+
+    mock_get.side_effect = _get
+
+    client = MotorTopoClient({
+        "type": "prefill",
+        "endpoints": ["10.0.0.1:%d" % port for port in A3_PREFILL_PORTS],
+    })
+    assert client.register("", {"type": "prefill"}) is False
+    mock_post.assert_not_called()
+    assert client._registered is False
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +844,75 @@ def test_register_returns_false_on_error(mock_post, monkeypatch):
         assert client._registered is False
 
 
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_register_posts_every_dp_endpoint_of_the_instance(mock_post, monkeypatch):
+    """The registered body carries the whole group: Motor derives
+    dp_size = len(endpoints) and routes each request to a DP rank, so a
+    one-endpoint body would pin the instance to 1/16 of the decode node."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.2")
+    monkeypatch.setenv("MOTOR_MODEL_NAME", "dsv4")
+    reload(envs)
+
+    response = MagicMock()
+    response.status_code = 200
+    response.text = "ok"
+    mock_post.return_value = response
+
+    with _patch_retry(), patch(
+        "patio.topo.client.motor_topo_client.requests.get"
+    ) as mock_get:
+        health = MagicMock()
+        health.status_code = 200
+        mock_get.return_value = health
+
+        worker_info = {
+            "type": "decode",
+            "endpoints": ["10.0.0.2:%d" % port for port in A3_DECODE_PORTS],
+        }
+        client = MotorTopoClient(worker_info)
+        assert client.register("", worker_info)
+
+        instance = mock_post.call_args[1]["json"]["instances"][0]
+        assert instance["id"] == MOTOR_CLI_DECODE_16EP_ID
+        assert instance["role"] == "decode"
+        assert len(instance["endpoints"]) == 16
+        assert [entry["id"] for entry in instance["endpoints"]] == list(range(16))
+        # health probe stays local (POD_IP), on the first DP port
+        assert client.health_check_endpoints == client.endpoints
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_register_does_not_retry_deterministic_4xx(mock_post, monkeypatch):
+    """A 409 (this instance id is already registered with a different shape) or a
+    400 can never start succeeding. register() runs on the 10s heartbeat, so it
+    must fail immediately instead of burning the 60 x 3s retry budget on every
+    beat."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    monkeypatch.setenv("MOTOR_MODEL_NAME", "dsv4")
+    reload(envs)
+
+    response = MagicMock()
+    response.status_code = 409
+    response.text = "instance ID 1147345019 does not match the registered instance"
+    mock_post.return_value = response
+
+    with patch("patio.topo.client.motor_topo_client.requests.get") as mock_get, patch(
+        "patio.topo.client.motor_topo_client.time.sleep", return_value=None
+    ):
+        health = MagicMock()
+        health.status_code = 200
+        mock_get.return_value = health
+
+        # utils.retry is deliberately NOT stubbed: a regression that retried the
+        # 4xx would issue 60 POSTs here (fast, because sleep is stubbed).
+        client = MotorTopoClient({"type": "prefill", "port": 8000})
+        assert client.register("", {"type": "prefill", "port": 8000}) is False
+        assert mock_post.call_count == 1
+        assert client._registered is False
+
+
 # ---------------------------------------------------------------------------
 # heartbeat-driven failure detection: unhealthy engine -> deregister
 # ---------------------------------------------------------------------------
@@ -592,6 +1007,36 @@ def test_unregister_posts_instance_del(mock_post, monkeypatch):
         # so that its own /v1/models probe is skipped
         assert body["model_name"] == "test-model"
         assert client._registered is False
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_unregister_carries_the_registered_endpoint_group(mock_post, monkeypatch):
+    """Motor matches a deletion by role + the physical endpoint set
+    (_same_delete_identity) and answers a partial group with a 409, so del must
+    repeat every endpoint that add advertised."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    monkeypatch.setenv("MOTOR_MODEL_NAME", "dsv4")
+    reload(envs)
+
+    response = MagicMock()
+    response.status_code = 200
+    response.text = "ok"
+    mock_post.return_value = response
+
+    with _patch_retry():
+        client = MotorTopoClient({
+            "type": "prefill",
+            "endpoints": ["10.0.0.1:%d" % port for port in A3_PREFILL_PORTS],
+        })
+        client._registered = True
+        assert client.unregister()
+        assert client._registered is False
+        instance = mock_post.call_args[1]["json"]["instances"][0]
+        assert instance["id"] == MOTOR_CLI_PREFILL_4EP_ID
+        assert [entry["address"] for entry in instance["endpoints"]] == [
+            "10.0.0.1:%d" % port for port in A3_PREFILL_PORTS
+        ]
 
 
 @patch("patio.topo.client.motor_topo_client.requests.post")
@@ -895,8 +1340,8 @@ def test_init_normalizes_a_bare_instance_address(monkeypatch):
     client = _make_client(
         monkeypatch, worker_info={"type": "prefill", "instance": "myhost"}
     )
-    assert client.address == "myhost:8000"
-    body = build_body("add", "prefill", client.address, client.instance_id)
+    assert client.endpoints == ["myhost:8000"]
+    body = build_body("add", "prefill", client.endpoints, client.instance_id)
     assert body["instances"][0]["endpoints"][0]["address"] == "myhost:8000"
     assert client.instance_id == derive_instance_id("prefill", "myhost:8000")
 
@@ -904,9 +1349,9 @@ def test_init_normalizes_a_bare_instance_address(monkeypatch):
 def test_init_brackets_ipv6_pod_ip(monkeypatch):
     _set_motor_env(monkeypatch)
     client = _make_client(monkeypatch, pod_ip="2001:db8::1")
-    assert client.address == "[2001:db8::1]:8000"
-    assert client.health_check_endpoint == "[2001:db8::1]:8000"
-    body = build_body("add", "prefill", client.address, client.instance_id)
+    assert client.endpoints == ["[2001:db8::1]:8000"]
+    assert client.health_check_endpoints == client.endpoints
+    body = build_body("add", "prefill", client.endpoints, client.instance_id)
     assert body["instances"][0]["endpoints"][0]["address"] == "[2001:db8::1]:8000"
 
 
@@ -1051,3 +1496,101 @@ def test_unregister_does_not_let_an_add_starve_it_of_the_whole_budget(mock_post,
 
     assert elapsed < 1.2, f"unregister overshot its 0.6s budget: {elapsed:.2f}s"
     mock_post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# endpoint-group configuration: explicit opt-in, validation, canonical form
+# ---------------------------------------------------------------------------
+
+def _endpoints_env(monkeypatch, pod_ip="10.0.0.1"):
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", pod_ip)
+    for name in ("MOTOR_INSTANCE_ENDPOINTS", "MOTOR_ENDPOINT_NUM",
+                 "MOTOR_DERIVE_ENDPOINTS", "MOTOR_BASE_PORT", "MOTOR_PORT_STEP"):
+        monkeypatch.delenv(name, raising=False)
+    reload(envs)
+
+
+def test_get_worker_endpoints_rejects_empty_ports(monkeypatch):
+    """`ports: []` used to fall through to a single endpoint, silently."""
+    import pytest
+    _endpoints_env(monkeypatch)
+    with pytest.raises(ValueError, match="non-empty list of ports"):
+        get_worker_endpoints({"type": "prefill", "ports": []})
+
+
+def test_get_worker_endpoints_rejects_non_positive_endpoint_num(monkeypatch):
+    """`endpoint_num: -2` used to fall through; `0` used to defer to the env."""
+    import pytest
+    _endpoints_env(monkeypatch)
+    for value in (-2, 0):
+        with pytest.raises(ValueError, match="endpoint_num must be >= 1"):
+            get_worker_endpoints({"type": "prefill", "endpoint_num": value})
+
+
+def test_get_worker_endpoints_endpoint_num_generates_ports(monkeypatch):
+    _endpoints_env(monkeypatch)
+    assert get_worker_endpoints({
+        "type": "prefill", "endpoint_num": 2, "base_port": 7100,
+    }) == ["10.0.0.1:7100", "10.0.0.1:7102"]
+
+
+def test_get_worker_endpoints_endpoint_num_from_env(monkeypatch):
+    _endpoints_env(monkeypatch)
+    monkeypatch.setenv("MOTOR_ENDPOINT_NUM", "2")
+    reload(envs)
+    assert get_worker_endpoints({"type": "prefill", "base_port": 7100}) == [
+        "10.0.0.1:7100", "10.0.0.1:7102"
+    ]
+
+
+def test_sort_endpoints_rejects_ports_outside_1_65535():
+    import pytest
+    for bad in ("10.0.0.1:0", "10.0.0.1:99999"):
+        with pytest.raises(ValueError, match="out of range 1..65535"):
+            sort_endpoints([bad])
+
+
+def test_sort_endpoints_canonicalizes_port_numbers():
+    """`h:08000` must hash and register exactly like `h:8000`, otherwise the
+    same endpoint derives two different instance ids (and a duplicate)."""
+    assert sort_endpoints(["h:08000"]) == ["h:8000"]
+    assert derive_instance_id("prefill", "h:08000") == derive_instance_id("prefill", "h:8000")
+
+
+# ---------------------------------------------------------------------------
+# G-01: a rejected heartbeat must not clear the registration mirror
+# ---------------------------------------------------------------------------
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+@patch("patio.topo.client.motor_topo_client.requests.get")
+def test_heartbeat_4xx_keeps_registration_mirror(mock_get, mock_post, monkeypatch):
+    """add 200 -> heartbeat 409 must leave _registered True: otherwise the
+    SIGTERM del is skipped and, with no TTL in Motor, the instance stays in the
+    pool forever."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("MOTOR_MODEL_NAME", "m")
+    client = _make_client(monkeypatch)
+    health = MagicMock()
+    health.status_code = 200
+    mock_get.return_value = health
+
+    ok = MagicMock()
+    ok.status_code = 200
+    ok.text = "ok"
+    conflict = MagicMock()
+    conflict.status_code = 409
+    conflict.text = "instance ID ... already belongs to another instance"
+    mock_post.side_effect = [ok, conflict, ok]
+
+    with _patch_retry():
+        assert client.register("", {"type": "prefill", "port": 8000}) is True
+        assert client._registered is True
+        assert client.register("", {"type": "prefill", "port": 8000}) is False
+        assert client._registered is True, "a deterministic 4xx must not clear the mirror"
+
+        assert client.unregister() is True
+
+    assert [call[1]["json"]["event"] for call in mock_post.call_args_list] == [
+        "add", "add", "del",
+    ]

@@ -120,13 +120,21 @@ inference, 1027 observability), and the management API key is off unless
 The worker's P/D role is taken from `type`/`worker_type` in the instance info
 (`prefill` or `decode` — the schema has no encode/union role), and the endpoint
 address from the `instance` field, `POD_IP`, or the RBG headless DNS. Patio states
-the instance id, role and endpoint address, plus the model name and the single
-dispatch plan it validates locally; Motor derives the job name, DP size and
-multi-endpoint routing from that. On every heartbeat the engine
-`/health` is probed: while the endpoint is healthy Patio keeps the instance
-registered (event=add); once the endpoint fails, Patio sends event=del so the
-Coordinator stops routing traffic to the dead (P or D) instance — no orphaned
-registration is left behind during multi-DP operation.
+the instance id, role and endpoint address(es), plus the model name and the
+single dispatch plan it validates locally; Motor derives the job name, DP size
+and multi-endpoint routing from that.
+
+By default one endpoint (rank 0) is registered, which is the complete answer for
+internal-LB topologies (vLLM DP attention, SGLang native DP, TP/PP/EP/CP). An
+external-LB deployment that runs one vLLM API server per DP rank opts into
+reporting the whole group via `endpoints` / `MOTOR_INSTANCE_ENDPOINTS` (or
+`ports` / `endpoint_num`, or `derive_endpoints` with `parallel_config`); see
+[Motor Registration](doc/motor_registration.md#endpoint-groups-and---instance-info).
+
+On every heartbeat the engine `/health` is probed — every endpoint of the group
+when one is configured: while all are healthy Patio keeps the instance
+registered (event=add); once one fails, Patio sends event=del so the Coordinator
+stops routing traffic to the dead (P or D) instance.
 
 Deregistration on `SIGTERM`/`SIGINT` is bounded by `MOTOR_UNREGISTER_DEADLINE`
 (default 10s) so that a terminating pod is never held up by an unreachable
@@ -201,6 +209,11 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `MOTOR_MGMT_API_KEY_FILE` | Path to the Motor management API key file (optional) | `None` |
 | `MOTOR_ENGINE_TYPE` | Engine family advertised to Motor (the External Deployer schema accepts `vllm` only) | `vllm` |
 | `MOTOR_DISPATCH_CAPABILITIES` | The single P/D dispatch plan (`prefill_handoff_decode` / `concurrent_engine_sync`); empty sends `prefill_handoff_decode`, Motor's own default | `prefill_handoff_decode` |
+| `MOTOR_INSTANCE_ENDPOINTS` | Comma-separated `host:port` DP endpoint group (opt-in; one endpoint is registered by default) | `None` |
+| `MOTOR_ENDPOINT_NUM` | Explicit number of generated DP endpoints | `None` |
+| `MOTOR_BASE_PORT` | First generated DP port | `10000` |
+| `MOTOR_PORT_STEP` | Step between generated DP ports | `2` |
+| `MOTOR_DERIVE_ENDPOINTS` | Derive the endpoint count from `parallel_config` + `device_num` (explicit opt-in) | off |
 | `MOTOR_UNREGISTER_DEADLINE` | Total budget for deregistration at shutdown (seconds) | `10` |
 | `MOTOR_UNREGISTER_INTERVAL` | Interval between shutdown deregistration attempts (seconds) | `1` |
 | `MOTOR_UNREGISTER_TIMEOUT` | Per-request timeout during shutdown deregistration (seconds) | `3` |

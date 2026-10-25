@@ -210,11 +210,11 @@ identity = "|".join([role, "ip:port", ...])          # endpoints sorted by (ip, 
 instance_id = 0x40000000 | (zlib.crc32(identity.encode()) & 0x3FFFFFFF)
 ```
 
-A sidecar always registers exactly one endpoint, so its identity is simply
-`"<role>|<host>:<port>"`. The address is canonicalized before hashing
-(`format_address(*split_address(address))`): a bare host becomes `host:8000` and
-an IPv6 literal is bracketed (`[2001:db8::1]:8000`), which is also the form the
-CLI hashes — so both surfaces agree for those inputs too.
+A sidecar registers one endpoint by default, so its identity is simply
+`"<role>|<host>:<port>"`; an opt-in DP group extends it to `"<role>|a|b|..."`.
+The addresses are canonicalized before hashing (bare host → `host:8000`, IPv6
+bracketed, port as a decimal integer, sorted by `(host, port)`), which is also
+the form the CLI hashes — so both surfaces agree for those inputs too.
 
 The namespace bit (`0x40000000`) keeps sidecar/CLI ids out of the range used by
 Controller-pushed instances.
@@ -226,6 +226,93 @@ role, job name and endpoint structure all match, so registering the **same
 endpoint through both the CLI and a sidecar** conflicts with
 `409 instance ID ... already belongs to another instance`. Use one surface per
 instance.
+
+## Endpoint groups and `--instance-info`
+
+A sidecar owns one P/D instance. **By default it registers exactly one endpoint**
+(the `instance` / `port` / `POD_IP` / RBG-DNS address): TP/PP/EP/CP, in-process
+DP attention and vLLM's internal LB (`--data-parallel-size=N`, also multi-node)
+expose a single routable API server and balance internally, so rank 0 is the
+complete routing answer and Motor correctly derives `dp_size=1`.
+
+An external-LB deployment instead runs one vLLM API server per DP rank (dp4×tp4
+on one 16-NPU Atlas 800I A3 node = 4 prefill endpoints; dp16×tp1 = 16 decode
+endpoints). Such a deployment **opts in** to reporting the whole group; Motor
+derives `dp_size` from its size and, on `add`, probes every endpoint and rejects
+the instance if one is unreachable.
+
+`--instance-info` is the primary configuration surface for this client:
+
+```json
+{"topo_type": "Motor", "data": {"type": "prefill", "port": 8000}}
+```
+
+`data` fields, first match wins:
+
+| Field | Meaning |
+| --- | --- |
+| `endpoints` | Authoritative complete group. Entries are `"host:port"` strings or `{"address": ...}` / `{"ip": ..., "port": ...}` mappings. May span pods. |
+| `ports` | Explicit DP ports of this pod's host; the host comes from the address below. |
+| `endpoint_num` | Explicit endpoint count, generated as `base_port + i*port_step`. |
+| `derive_endpoints` | Boolean opt-in to derive the count from `parallel_config` + `device_num` (see below). |
+| `type` / `worker_type` | `prefill` or `decode` (required). |
+| `instance` | Explicit `host:port` (or bare host → port 8000) of the single endpoint. |
+| `port` | Engine port for the single endpoint (default 8000). |
+| `base_port` / `port_step` | Port convention for generated endpoints (defaults 10000 / 2). |
+| `parallel_config` | `dp_size`, `tp_size`, `pp_size`, `pcp_size`, `local_world_size`; `local_world_size` defaults to `tp*pp*pcp`. |
+| `device_num` / `npu_num` | NPUs on the node, needed by the derivation switch. |
+| `data_parallel_size` | Fallback for `parallel_config.dp_size`. |
+
+The equivalent environment variables are `MOTOR_INSTANCE_ENDPOINTS`
+(comma-separated group), `MOTOR_ENDPOINT_NUM`, `MOTOR_BASE_PORT`,
+`MOTOR_PORT_STEP` and `MOTOR_DERIVE_ENDPOINTS`. An explicit `data` field wins
+over its env var, and `endpoints` wins over every generated form.
+
+Examples:
+
+```json
+// internal LB (SGLang / vLLM DP): one routable endpoint
+{"topo_type": "Motor", "data": {"type": "decode", "port": 8000}}
+
+// external LB, explicit group (dp4 x tp4 prefill on one host)
+{"topo_type": "Motor",
+ "data": {"type": "prefill",
+          "endpoints": ["10.0.0.1:7100", "10.0.0.1:7102",
+                        "10.0.0.1:7104", "10.0.0.1:7106"]}}
+
+// external LB, ports derived with Motor's convention (dp16 x tp1 decode)
+{"topo_type": "Motor",
+ "data": {"type": "decode", "derive_endpoints": true,
+          "parallel_config": {"dp_size": 16, "tp_size": 1},
+          "device_num": 16, "base_port": 7100, "port_step": 2}}
+
+// group spanning two pods (Motor keys endpoints by ip)
+{"topo_type": "Motor",
+ "data": {"type": "decode",
+          "endpoints": ["prefill-0.s-demo:7100", "prefill-1.s-demo:7100"]}}
+```
+
+Notes:
+
+* Derivation is **never implicit**: `parallel_config` alone still means one
+  endpoint, because guessing `base_port + i*step` would register ports that do
+  not exist for an internal-LB engine.
+* A configuration that is present but invalid is an error, not a silent
+  fallback: `ports: []`, `endpoint_num: 0` / `-2`, a port outside `1..65535`,
+  or `derive_endpoints` without `dp_size`/`device_num` all fail at construction.
+* Injected group addresses must be **stable DNS names**, not pod IPs: the
+  instance id is a CRC32 over the endpoint list, so a changed pod IP derives a
+  new id and orphans the old registration (Motor has no TTL). The owner pod
+  must withdraw the whole group when it goes away.
+* The health gate probes **every** endpoint in the group. A single unreachable
+  rank fails the gate and withdraws the instance, which is what Motor would do
+  on the next `add` anyway; a network partition that makes a remote rank
+  unreachable therefore withdraws the whole instance.
+* Canonicalization can change an existing id for non-canonical input: a bare
+  host is now `host:8000`, IPv6 is bracketed and `h:08000` is `h:8000`. Register
+  through one surface (CLI or sidecar) and use canonical addresses in
+  inventory inputs; the one-endpoint id for a canonical `host:port` is
+  unchanged.
 
 ## Lifecycle and shutdown budget
 
@@ -285,6 +372,11 @@ engine recovers, so it never consults the flag.
 | `MOTOR_MGMT_API_KEY_FILE` | – | file holding the `X-Motor-Management-Key` value |
 | `MOTOR_ENGINE_TYPE` | `vllm` | engine family advertised to Motor; only `vllm` is accepted by the External Deployer protocol |
 | `MOTOR_DISPATCH_CAPABILITIES` | `prefill_handoff_decode` | the single `DispatchPlan` value for this deployment (`prefill_handoff_decode` / `concurrent_engine_sync`); an empty value sends `prefill_handoff_decode` explicitly (Motor's own default), so behaviour does not depend on the Coordinator's defaults |
+| `MOTOR_INSTANCE_ENDPOINTS` | – | comma-separated `host:port` DP group (opt-in; see [Endpoint groups](#endpoint-groups-and---instance-info)) |
+| `MOTOR_ENDPOINT_NUM` | – | explicit endpoint count, generated as `base_port + i*port_step` |
+| `MOTOR_BASE_PORT` | `10000` | first generated DP port |
+| `MOTOR_PORT_STEP` | `2` | step between generated DP ports |
+| `MOTOR_DERIVE_ENDPOINTS` | off | explicit opt-in to derive ports from `parallel_config` + `device_num` |
 | `MOTOR_UNREGISTER_DEADLINE` | `10` | seconds, total shutdown deregistration budget |
 | `MOTOR_UNREGISTER_INTERVAL` | `1` | seconds between shutdown attempts |
 | `MOTOR_UNREGISTER_TIMEOUT` | `3` | per-request timeout during shutdown |
@@ -300,10 +392,11 @@ startup in the Patio client.
 | Situation | Behaviour |
 | --- | --- |
 | Coordinator not up yet | registration retries (`utils.retry`, 60 × 3s) like the vLLM client |
-| Coordinator answers a deterministic `4xx` on `add` | also retried by the shared policy (60 × 3s); the next heartbeat would retry anyway, so fail-fast is a follow-up, not a correctness issue |
+| Coordinator answers a deterministic `4xx` on `add` | logged and **not** retried: a 409/401 cannot start succeeding, and this runs on the heartbeat, so the next beat retries anyway |
 | SIGTERM while an `add` is in flight | no new `add` starts, the shutdown `del` waits (half the budget) for the in-flight one, then is sent |
+| Engine dies between heartbeats | the next heartbeat's group health gate fails → `del` |
+| One DP of a registered group dies | the gate fails → the whole instance is withdrawn (Motor would reject the next `add` anyway) |
 | Coordinator gone at shutdown | deregistration gives up after `MOTOR_UNREGISTER_DEADLINE` |
-| Engine died but sidecar alive | heartbeat sees `/health` fail → `del`; traffic stops |
 | Pod hard-killed (SIGKILL/OOM) | `del` never sent — see below |
 | Engine comes back | heartbeat re-registers; `add` is idempotent |
 
@@ -357,15 +450,19 @@ Patio client additionally rejects an invalid role locally, before any HTTP call.
 ## Verification
 
 * `tests/mock_tests/test_motor_topo_client.py` — payload shape (including the
-  "never mix shapes" invariant), id derivation and address canonicalization, the
-  three protocol restrictions (validated at construction), address formatting
-  (IPv4 / DNS / IPv6, including a bracketed IPv6 `POD_IP` in both the payload and
-  the `/health` endpoint), register/heartbeat behaviour, failure-driven
-  deregistration, and the bounded, fail-fast shutdown path (`404` → success,
-  other `4xx` → immediate failure, `5xx`/transport → retried until the deadline,
-  per-attempt timeout capped at the remaining budget). The shutdown race has its
-  own cases: no `add` after `EXIT_EVENT`, and a `del` blocked until an in-flight
-  `add` returns.
+  "never mix shapes" invariant), id derivation over one endpoint and a DP group
+  plus address canonicalization, the three protocol restrictions (validated at
+  construction), address formatting (IPv4 / DNS / IPv6, including a bracketed
+  IPv6 `POD_IP` in both the payload and the `/health` endpoint), endpoint-group
+  resolution (explicit group, env, ports, `endpoint_num`, derivation behind its
+  opt-in, invalid/empty configurations, port range), per-endpoint health gating,
+  register/heartbeat behaviour, failure-driven deregistration, and the bounded,
+  fail-fast shutdown path (`404` → success, other `4xx` → immediate failure,
+  `5xx`/transport → retried until the deadline, per-attempt timeout capped at
+  the remaining budget). The shutdown race has its own cases: no `add` after
+  `EXIT_EVENT`, and a `del` blocked until an in-flight `add` returns. A rejected
+  heartbeat (`4xx`) must not clear the registration mirror — that regression is
+  covered explicitly.
 * `MindIE-Motor/tests/coordinator/api_server/test_management_server_instances.py`
   — the same contract against Motor's real HTTP surface and real
   `InstanceManager`: add → `GET /instances` → idempotent re-add → del →

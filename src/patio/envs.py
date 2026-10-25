@@ -40,6 +40,14 @@ MOTOR_MODEL_NAME = os.getenv("MOTOR_MODEL_NAME")
 # accept fails at construction instead of at registration.
 MOTOR_ENGINE_TYPE = os.getenv("MOTOR_ENGINE_TYPE")
 MOTOR_DISPATCH_CAPABILITIES = os.getenv("MOTOR_DISPATCH_CAPABILITIES")
+# Endpoint-group opt-in. One endpoint is registered by default (the common
+# internal-LB topology exposes a single API server); these select an explicit
+# group instead, or derive its ports from parallel_config + device_num.
+MOTOR_INSTANCE_ENDPOINTS = os.getenv("MOTOR_INSTANCE_ENDPOINTS")
+MOTOR_BASE_PORT = os.getenv("MOTOR_BASE_PORT")
+MOTOR_PORT_STEP = os.getenv("MOTOR_PORT_STEP")
+MOTOR_ENDPOINT_NUM = os.getenv("MOTOR_ENDPOINT_NUM")
+MOTOR_DERIVE_ENDPOINTS = os.getenv("MOTOR_DERIVE_ENDPOINTS")
 
 # Deregistration budget. unregister() runs inside the SIGTERM/SIGINT handler, so
 # it is bounded by a deadline instead of the 60x3s registration retry budget:
