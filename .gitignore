@@ -15,3 +15,5 @@ build/
 *~
 .idea/
 .vscode/
+
+.agent/
