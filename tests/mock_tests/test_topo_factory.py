@@ -9,6 +9,7 @@ import pytest
 
 from patio import envs
 from patio.topo.factory import create_topo_client, create_topo_server
+from patio.topo.client.motor_topo_client import MotorTopoClient
 from patio.topo.client.sgl_topo_client import SGLangGroupTopoClient
 from patio.topo.client.vllm_topo_client import VLLMProxyTopoClient
 from patio.topo.server.sgl_topo_server import SGLangGroupTopoServer
@@ -38,6 +39,18 @@ def test_create_topo_client_vllm(monkeypatch):
         "vllm", {"type": "prefill", "instance": "localhost:8102"}
     )
     assert isinstance(client, VLLMProxyTopoClient)
+
+
+def test_create_topo_client_motor(monkeypatch):
+    """Test that create_topo_client returns Motor client for motor type."""
+    monkeypatch.setenv("RBG_GROUP_NAME", "demo")
+    monkeypatch.setenv("ROUTER_ROLE_NAME", "router")
+    monkeypatch.setenv("ROUTER_PORT", "9000")
+    monkeypatch.setenv("POD_IP", "10.0.0.8")
+    reload(envs)
+
+    client = create_topo_client("motor", {"type": "prefill", "port": 8000})
+    assert isinstance(client, MotorTopoClient)
 
 
 def test_create_topo_client_invalid():
