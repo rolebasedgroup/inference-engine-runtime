@@ -1,0 +1,34 @@
+title: Short, Descriptive Proposal Title
+proposal-number: NNNN
+authors:
+  - "@your-github-username"
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# draft | review | accepted | implemented | rejected | withdrawn | superseded | deferred
+status: draft
+
+creation-date: yyyy-mm-dd
+last-updated: yyyy-mm-dd
+
+# The first Patio version expected to contain this behavior, if accepted.
+target-version: TBD
+
+# Component(s) primarily affected by this change.
+areas:
+  - api
+  - engine
+  - metrics
+  - topo
+  - deployment
+  - documentation
+
+# Related issues and pull requests.
+issues:
+  - TBD
+see-also:
+  - TBD
+replaces:
+  - TBD
