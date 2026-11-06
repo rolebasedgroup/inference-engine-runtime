@@ -1,0 +1,26 @@
+title: Patio as RoleInstance Lifecycle Hook Executor
+proposal-number: 14
+authors:
+  - diw-zw
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# draft | review | accepted | implemented | rejected | withdrawn | superseded | deferred
+status: draft
+
+creation-date: 2026-11-06
+last-updated: 2026-11-06
+
+# Component(s) primarily affected by this change.
+areas:
+  - topo
+  - deployment
+  - documentation
+
+# Related issues and pull requests.
+issues:
+  - https://github.com/rolebasedgroup/inference-engine-runtime/issues/14
+see-also:
+  - https://github.com/sgl-project/rbg/blob/main/keps/527-roleinstance-lifecycle/README.md
