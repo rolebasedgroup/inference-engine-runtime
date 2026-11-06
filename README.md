@@ -285,6 +285,11 @@ pytest tests/mock_tests/test_sglang_engine.py -v
 docker build -t inference-engine-runtime:latest .
 ```
 
+### AI Coding Agents
+
+Guidance for AI coding agents (architecture, conventions, development playbooks, and the review checklist)
+lives in [AGENTS.md](AGENTS.md) and the skills under [`.agents/skills/`](.agents/skills).
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
