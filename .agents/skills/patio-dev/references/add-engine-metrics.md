@@ -1,7 +1,7 @@
 # Playbook: add or change standardized engine metrics
 
 Patio exposes **only** the engine metrics that have a rule in `src/patio/metrics/engine_metric_rules.py`, renamed
-into the `patio:` namespace. Background: `references/architecture.md` §8.
+into the `patio:` namespace. Background: `.agents/skills/patio-dev/references/architecture.md` §8.
 
 ## Steps
 

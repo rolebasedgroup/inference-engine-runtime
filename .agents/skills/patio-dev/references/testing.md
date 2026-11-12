@@ -103,7 +103,8 @@ Importing `patio.app` doesn't start the server or call `configure_logging`; only
 ## Metrics
 
 Push Prometheus text through `EngineCollector` into a fresh `CollectorRegistry` and assert on the
-`generate_latest` output. A complete template is in `references/add-engine-metrics.md`. Don't register test
+`generate_latest` output. A complete template is in
+`.agents/skills/patio-dev/references/add-engine-metrics.md`. Don't register test
 collectors on the shared `patio_registry`.
 
 ## What every change should cover

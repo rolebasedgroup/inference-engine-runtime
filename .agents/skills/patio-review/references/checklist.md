@@ -30,6 +30,9 @@ reviews.
       validates input inside its `try` so failures return `False`.
 - [ ] `unregister()` is bounded well below the pod grace period (default 30 s) and fails fast on 4xx (#6). It
       runs only after uvicorn's graceful shutdown, and only on uvicorn ≥ 0.29.
+- [ ] `register()` records what `unregister()` needs before its first attempt and sends nothing once
+      `unregister()` has started, and `unregister()` waits (bounded) for an in-flight registration. The heartbeat
+      keeps running during shutdown (known issue K11) (#13).
 - [ ] The router address comes from `ROUTER_ROLE_NAME`/`ROUTER_PORT` (legacy `SGL_ROUTER_*` fallback) in RBG DNS
       format, and the worker address honors `POD_IP`.
 - [ ] Missing required configuration raises a clear `RuntimeError` in `__init__` (startup aborts) rather than
@@ -80,4 +83,5 @@ reviews.
 - [ ] A proposal exists (`proposals/README.md`) for a new engine backend, a new router integration, a change to
       a public API, protocol, or configuration contract, or a change to lifecycle, security, or failure
       recovery. `proposal.yaml` has the correct `status`.
-- [ ] If a listed known issue was fixed, its entry in `references/known-issues.md` is removed in the same PR.
+- [ ] If a listed known issue was fixed, its entry in
+      `.agents/skills/patio-review/references/known-issues.md` is removed in the same PR.

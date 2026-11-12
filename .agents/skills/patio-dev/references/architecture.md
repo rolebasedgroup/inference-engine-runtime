@@ -30,8 +30,8 @@ router's view of the worker up to date.
 | Starlette threadpool | The sync `def metrics()` handler. The engine scrape uses blocking `requests`, so it must stay a sync handler |
 | `patio-heartbeat` (daemon) | `while not EXIT_EVENT.wait(timeout=HEARTBEAT_INTERVAL): topo_client.register("", worker_info)` |
 
-`EXIT_EVENT` (`config.py`) is never set, so the heartbeat thread lives until the process exits. Logs go to
-stdout and to the rotating file `/tmp/patio/patio.log` (10 MB × 10).
+`EXIT_EVENT` (`config.py`) is never set, so the heartbeat thread lives until the process exits and keeps
+running during shutdown (§4). Logs go to stdout and to the rotating file `/tmp/patio/patio.log` (10 MB × 10).
 
 ## 3. Startup sequence
 
@@ -73,6 +73,11 @@ On uvicorn ≥ 0.29 (verified on 0.54):
 2. uvicorn restores the previously installed handler, Patio's `stop_topo_client_signal_handler`, and
    re-raises the signal.
 3. Patio calls `topo_client.unregister()` and then `sys.exit(0)`.
+
+The heartbeat thread is never stopped, so a `register()` that is in flight or starts during step 3 can re-add
+the worker after `unregister()` removed it, and the pod then exits while still registered (known issue K11).
+The existing clients don't guard against this; the skeleton in
+`.agents/skills/patio-dev/references/add-topo-client.md` does.
 
 On uvicorn 0.15–0.28, which `pyproject.toml` still allows (`uvicorn>=0.15.0`), uvicorn replaces Patio's handler
 and never re-raises the signal, so `unregister()` never runs. In both cases the whole sequence must finish

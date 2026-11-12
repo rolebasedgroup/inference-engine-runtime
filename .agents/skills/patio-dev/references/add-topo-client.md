@@ -1,8 +1,9 @@
 # Playbook: add or change a topology (router/proxy) client
 
 Use this to integrate a new router, proxy, or coordinator that Patio registers workers with (for example
-MindIE Motor, PR #6), or to change an existing client. Background: `references/architecture.md` §9 and
-RFC issue #7 (one router management protocol per `GroupTopoClient`).
+MindIE Motor, PR #6), or to change an existing client. Background:
+`.agents/skills/patio-dev/references/architecture.md` §9 and RFC issue #7 (one router management protocol per
+`GroupTopoClient`).
 
 ## Before writing code
 
@@ -23,7 +24,7 @@ RFC issue #7 (one router management protocol per `GroupTopoClient`).
 | `src/patio/topo/client/<name>_topo_client.py` | New `GroupTopoClient` subclass (skeleton below) |
 | `src/patio/config.py` | Canonical constant, added to `SUPPORTED_TOPO_TYPES` |
 | `src/patio/topo/factory.py` | `elif topo_type.lower() == "<name>":` branch in `create_topo_client` |
-| `src/patio/envs.py` | New `<NAME>_*` variables, if any (see `references/configuration.md`) |
+| `src/patio/envs.py` | New `<NAME>_*` variables, if any (see `.agents/skills/patio-dev/references/configuration.md`) |
 | `tests/mock_tests/test_<name>_topo_client.py` | Unit tests (template below) |
 | `tests/mock_tests/test_topo_factory.py` | Factory selection, including a lowercase value |
 | `README.md` | "Distributed Topology Management" section and the env-var table |
@@ -36,8 +37,8 @@ RFC issue #7 (one router management protocol per `GroupTopoClient`).
 |--------|--------|------|
 | `__init__(worker_info)` | Once at startup, from `create_topo_client` | Resolve addresses through `envs.*`/`POD_IP` and raise `RuntimeError` with a clear message when required configuration is missing (startup then exits 1) |
 | `wait_engine_ready(worker_info) -> bool` | Once at startup | `GET /health` on the local engine with `utils.retry`; return `False` instead of raising |
-| `register(url, worker_info, file_path=None) -> bool` | At startup, then every `HEARTBEAT_INTERVAL` | Idempotent; work on a copy of `worker_info`; validate inside `try`; return `False` on failure. `url` and `file_path` are unused legacy parameters |
-| `unregister() -> bool` | Once, from the SIGTERM/SIGINT handler, after uvicorn's graceful shutdown (only on uvicorn ≥ 0.29) | Bounded total time (well under 30 s), fail fast on 4xx. If the router has no unregister API, log it and return `True` |
+| `register(url, worker_info, file_path=None) -> bool` | At startup, then every `HEARTBEAT_INTERVAL`, including while `unregister()` runs | Idempotent; work on a copy of `worker_info`; validate inside `try`; return `False` on failure. Record what `unregister()` needs before the first attempt, because a request whose response is lost may still have registered the worker. Send nothing once `unregister()` has started. `url` and `file_path` are unused legacy parameters |
+| `unregister() -> bool` | Once, from the SIGTERM/SIGINT handler, after uvicorn's graceful shutdown (only on uvicorn ≥ 0.29). The heartbeat thread is still running (known issue K11) | Stop further registration attempts first and wait, bounded, for an in-flight one, so its add can't reach the router after the remove. Bounded total time (well under 30 s), fail fast on 4xx. If the router has no unregister API, log it and return `True` |
 
 Every request takes `timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_HEALTH_CHECK_TIMEOUT)` for health checks or
 `(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT)` for router calls.
@@ -49,6 +50,7 @@ with the real one.
 
 ```python
 import os
+import threading
 import time
 import traceback
 from typing import Optional
@@ -92,6 +94,10 @@ class ExampleTopoClient(GroupTopoClient):
         else:
             raise RuntimeError("POD_IP or RBG_ROLE_NAME and RBG_ROLE_INDEX must be set")
         self.role: Optional[str] = None
+        # The heartbeat keeps calling register() while the SIGTERM handler runs
+        # unregister() (app.py never stops it), so the two are serialized.
+        self._lock = threading.Lock()
+        self._stopping = threading.Event()
 
     def wait_engine_ready(self, worker_info: dict) -> bool:
         def f():
@@ -121,21 +127,29 @@ class ExampleTopoClient(GroupTopoClient):
                 raise ValueError("worker type is not set")
             payload = {"role": role, "address": self.address}
             add_url = f"http://{self.router_endpoint}/workers/add"
+            # Set before the first attempt: a request whose response is lost may still have
+            # registered the worker, and unregister() needs the role to remove it.
+            self.role = role
 
             def f():
-                resp = requests.post(
-                    add_url,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
-                )
+                with self._lock:
+                    if self._stopping.is_set():
+                        return False
+                    resp = requests.post(
+                        add_url,
+                        json=payload,
+                        headers={"Content-Type": "application/json"},
+                        timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
+                    )
                 if not 200 <= resp.status_code < 300:
                     raise RuntimeError(
                         f"register failed, url: {add_url}, status_code: {resp.status_code}, content: {resp.text}"
                     )
+                return True
 
-            utils.retry(f, retry_times=60, interval=3)
-            self.role = role
+            if not utils.retry(f, retry_times=60, interval=3):
+                logger.info("worker is being unregistered, skipping registration")
+                return False
             logger.info(f"registered worker {self.address} as {role}")
             return True
         except Exception as e:
@@ -144,12 +158,18 @@ class ExampleTopoClient(GroupTopoClient):
             return False
 
     def unregister(self) -> bool:
+        # Stop new registration attempts, then let an in-flight one finish so that its
+        # add can't reach the router after the remove.
+        self._stopping.set()
         if self.role is None:
-            logger.warning("worker was never registered, skipping unregister")
+            logger.warning("registration was never attempted, skipping unregister")
             return False
         remove_url = f"http://{self.router_endpoint}/workers/remove"
         payload = {"role": self.role, "address": self.address}
         deadline = time.monotonic() + UNREGISTER_DEADLINE_SECONDS
+        locked = self._lock.acquire(timeout=UNREGISTER_DEADLINE_SECONDS)
+        if not locked:
+            logger.warning("registration still in flight, removing the worker anyway")
         try:
             while True:
                 try:
@@ -181,6 +201,9 @@ class ExampleTopoClient(GroupTopoClient):
             logger.error(f"failed to unregister worker: {e}")
             traceback.print_exc()
             return False
+        finally:
+            if locked:
+                self._lock.release()
 ```
 
 ## Test template
@@ -188,6 +211,8 @@ class ExampleTopoClient(GroupTopoClient):
 ```python
 from importlib import reload
 from unittest.mock import MagicMock, patch
+
+import requests
 
 from patio import envs
 from patio.topo.client.example_topo_client import ExampleTopoClient
@@ -258,14 +283,42 @@ def test_unregister_fails_fast_on_4xx(mock_post, monkeypatch):
     client.role = "prefill"
     assert client.unregister() is False
     assert mock_post.call_count == 1
+
+
+@patch(f"{MODULE}.requests.post")
+def test_unregister_runs_when_registration_outcome_is_unknown(mock_post, monkeypatch):
+    set_env(monkeypatch)
+    client = ExampleTopoClient({"type": "prefill"})
+    mock_post.side_effect = requests.Timeout("read timed out")
+    with patch(f"{MODULE}.utils.retry", side_effect=lambda func, **_: func()):
+        assert client.register("", {"type": "prefill"}) is False
+
+    mock_post.side_effect = None
+    mock_post.return_value = MagicMock(status_code=200)
+    assert client.unregister() is True
+    assert mock_post.call_args.args[0].endswith("/workers/remove")
+
+
+@patch(f"{MODULE}.requests.post")
+def test_register_sends_nothing_after_unregister(mock_post, monkeypatch):
+    set_env(monkeypatch)
+    mock_post.return_value = MagicMock(status_code=200)
+    client = ExampleTopoClient({"type": "prefill"})
+    assert client.register("", {"type": "prefill"}) is True
+    assert client.unregister() is True
+    mock_post.reset_mock()
+
+    assert client.register("", {"type": "prefill"}) is False
+    mock_post.assert_not_called()
 ```
 
 Also cover: the `wait_engine_ready` URL and timeout tuple; missing env in `__init__` raising `RuntimeError`;
-`unregister()` stopping at the deadline (patch `time.monotonic`/`time.sleep`); the legacy env fallback; and
-factory selection with a lowercase `topo_type`.
+`unregister()` stopping at the deadline (patch `time.monotonic`/`time.sleep`); `unregister()` waiting for an
+add that is already in flight before it sends the remove (block the mocked add on a `threading.Event` and call
+`register()` from a second thread); the legacy env fallback; and factory selection with a lowercase `topo_type`.
 
 ## Review focus
 
 The topology section of `.agents/skills/patio-review/references/checklist.md`. In past reviews the most
-common findings were missing timeouts (#3), env renames without a fallback (#3), and an unbounded unregister
-on SIGTERM (#6).
+common findings were missing timeouts (#3), env renames without a fallback (#3), an unbounded unregister on
+SIGTERM (#6), and a heartbeat registration re-adding the worker during shutdown (#13).

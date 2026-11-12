@@ -35,6 +35,10 @@ A single process serves a FastAPI app on port `9091` and does three things:
 | `proposals/` | Design-proposal process and template | `proposals/README.md` |
 | `doc/` | User documentation, partly stale | |
 
+Paths in this file, `.github/instructions/`, and `.agents/skills/` are relative to the repository root, with two
+exceptions: in a `SKILL.md`, `references/...` is relative to that skill's directory, and source paths written
+without `src/patio/` (such as `topo/factory.py`) are relative to `src/patio/`.
+
 ## Runtime model
 
 1. `main()` parses CLI flags and configures logging.
@@ -116,7 +120,8 @@ surrounding style and do not reformat code you did not change.
 - **Metrics:** register on `patio_registry`, never on the global `REGISTRY`; standardized names carry the
   `patio:` prefix; label values must stay bounded.
 - **Lifecycle:** background threads are daemon threads. Anything on the SIGTERM path must finish well within
-  the pod's termination grace period (Kubernetes default: 30 s).
+  the pod's termination grace period (Kubernetes default: 30 s). The heartbeat is not stopped before
+  `unregister()` runs, so a client's `register()` must send nothing once `unregister()` has started.
 - **Logging:** create `logger = init_logger(__name__)` at module level. Failure logs include the URL, status code,
   and response body.
 - **Legacy, unused at runtime** (don't build on these without a proposal): `topo/server/*`, `create_topo_server`,

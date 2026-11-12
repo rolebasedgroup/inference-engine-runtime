@@ -17,6 +17,10 @@ class. Playbook: `.agents/skills/patio-dev/references/add-topo-client.md`.
 - `unregister()` runs on the SIGTERM path (on uvicorn ≥ 0.29). Bound its total duration well below the pod
   termination grace period (Kubernetes default 30 s) and fail fast on 4xx. Do not use
   `utils.retry(retry_times=60, interval=3)` there.
+- `app.py` doesn't stop the heartbeat before calling `unregister()` (known issue K11). Record what
+  `unregister()` needs before the first registration attempt (a lost response may still have registered the
+  worker), send nothing from `register()` once `unregister()` has started, and have `unregister()` wait,
+  bounded, for an in-flight registration before it removes the worker.
 - Keep the error contract of the existing clients: catch the exception, call `logger.error(...)` with the
   URL, status code, and body, call `traceback.print_exc()`, and return a `bool`.
 - Read configuration as `envs.X` at call time, not via `from patio.envs import X`. The router address comes from

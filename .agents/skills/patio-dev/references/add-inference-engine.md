@@ -1,7 +1,7 @@
 # Playbook: add an inference engine backend
 
 Use this to support a new `INFERENCE_ENGINE` value. A new engine backend needs a proposal
-(`proposals/README.md`). Background: `references/architecture.md` §5–§8.
+(`proposals/README.md`). Background: `.agents/skills/patio-dev/references/architecture.md` §5–§8.
 
 ## Files to touch
 
@@ -12,7 +12,7 @@ Use this to support a new `INFERENCE_ENGINE` value. A new engine backend needs a
 | `src/patio/metrics/engine_metric_rules.py` | `<NAME>_METRIC_STANDARD_RULES` and a branch in `get_metric_standard_rules`. **Required:** without it, startup raises `ValueError` whenever metric scraping is enabled (the default) and `INFERENCE_ENGINE_ENDPOINT` is set |
 | `tests/mock_tests/test_<name>_engine.py` | Engine tests (template below) |
 | `tests/mock_tests/test_engine_base.py` | Factory case, following `test_inference_engine_vllm` |
-| `tests/mock_tests/test_metrics.py` | Rule tests (see `references/add-engine-metrics.md`) |
+| `tests/mock_tests/test_metrics.py` | Rule tests (see `.agents/skills/patio-dev/references/add-engine-metrics.md`) |
 | `README.md`, `doc/engine.md`, `doc/metrics.md` | Accepted `INFERENCE_ENGINE` values, engine endpoints, metric mapping table |
 
 ## Rules

@@ -44,7 +44,8 @@ commands. This skill adds the workflow, playbooks, and detailed references.
 - Every outbound request has an explicit timeout, and nothing on the SIGTERM path can outlast the pod's
   grace period.
 - A renamed env var keeps the old name as a fallback, and topology-type matching stays case-insensitive.
-- `register()` is idempotent, because the heartbeat calls it again and again.
+- `register()` is idempotent, because the heartbeat calls it again and again, and it sends nothing once
+  `unregister()` has started, because the heartbeat keeps running during shutdown.
 - No blocking I/O inside `async def`, and no new `httpx.AsyncClient` per request unless it is closed.
 - Only pydantic v2 validators; request models extend `NoExtraBaseModel`.
 - Don't copy any pattern listed in `.agents/skills/patio-review/references/known-issues.md`.
