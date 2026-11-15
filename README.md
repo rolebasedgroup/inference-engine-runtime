@@ -101,21 +101,28 @@ env:
     value: "router"          # the Motor Coordinator management service
   - name: ROUTER_PORT
     value: "1026"            # Motor management API port
-  - name: MOTOR_MODEL_NAME   # optional; else Motor probes the engine /v1/models
+  - name: MOTOR_MODEL_NAME   # optional; else Patio probes the engine, then Motor
     value: "Qwen2.5-7B"
   - name: MOTOR_MGMT_API_KEY_FILE  # optional; path to the management API key file
     value: "/etc/patio/mgmt-key"
   - name: MOTOR_ENGINE_TYPE        # optional; only vllm is supported by the schema
     value: "vllm"
-  - name: MOTOR_DISPATCH_CAPABILITIES  # optional; one plan, empty = Motor's vLLM HANDOFF default
+  - name: MOTOR_DISPATCH_CAPABILITIES  # optional; one plan, empty sends Motor's default
     value: "prefill_handoff_decode"
 ```
 
+The Coordinator binds `127.0.0.1` by default: inject `POD_IP` (or set
+`coordinator_api_host`) on the Coordinator pod, otherwise port 1026 is not
+reachable through the headless service. Its management port is 1026 (1025 serves
+inference, 1027 observability), and the management API key is off unless
+`mgmt_api_key_config.enable_api_key` is set.
+
 The worker's P/D role is taken from `type`/`worker_type` in the instance info
 (`prefill` or `decode` — the schema has no encode/union role), and the endpoint
-address from the `instance` field, `POD_IP`, or the RBG headless DNS. Patio sends
-just the instance id, role and endpoint address; Motor derives the job name, DP
-size and multi-endpoint routing from that. On every heartbeat the engine
+address from the `instance` field, `POD_IP`, or the RBG headless DNS. Patio states
+the instance id, role and endpoint address, plus the model name and the single
+dispatch plan it validates locally; Motor derives the job name, DP size and
+multi-endpoint routing from that. On every heartbeat the engine
 `/health` is probed: while the endpoint is healthy Patio keeps the instance
 registered (event=add); once the endpoint fails, Patio sends event=del so the
 Coordinator stops routing traffic to the dead (P or D) instance — no orphaned
@@ -190,10 +197,10 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `ROLE_NAME` | RBG role name | `None` |
 | `ROLE_INDEX` | RBG role index | `None` |
 | `HEARTBEAT_INTERVAL` | Topology heartbeat interval (seconds) | `30` |
-| `MOTOR_MODEL_NAME` | Model name for Motor registration; if unset, Motor probes the engine `/v1/models` | `None` |
+| `MOTOR_MODEL_NAME` | Model name for Motor registration; if unset, Patio probes the local engine `/v1/models` and only falls back to Motor's own probe if that fails | `None` |
 | `MOTOR_MGMT_API_KEY_FILE` | Path to the Motor management API key file (optional) | `None` |
 | `MOTOR_ENGINE_TYPE` | Engine family advertised to Motor (the External Deployer schema accepts `vllm` only) | `vllm` |
-| `MOTOR_DISPATCH_CAPABILITIES` | The single P/D dispatch plan (`prefill_handoff_decode` / `concurrent_engine_sync`); empty means Motor's vLLM HANDOFF default | `prefill_handoff_decode` |
+| `MOTOR_DISPATCH_CAPABILITIES` | The single P/D dispatch plan (`prefill_handoff_decode` / `concurrent_engine_sync`); empty sends `prefill_handoff_decode`, Motor's own default | `prefill_handoff_decode` |
 | `MOTOR_UNREGISTER_DEADLINE` | Total budget for deregistration at shutdown (seconds) | `10` |
 | `MOTOR_UNREGISTER_INTERVAL` | Interval between shutdown deregistration attempts (seconds) | `1` |
 | `MOTOR_UNREGISTER_TIMEOUT` | Per-request timeout during shutdown deregistration (seconds) | `3` |

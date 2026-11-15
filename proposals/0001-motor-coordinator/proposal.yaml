@@ -1,0 +1,31 @@
+title: Register Sidecar-Managed Engines with MindIE Motor
+proposal-number: 0001
+authors:
+  - "@dunjin"
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# draft | review | accepted | implemented | rejected | withdrawn | superseded | deferred
+status: draft
+
+creation-date: 2026-11-15
+last-updated: 2026-11-15
+
+# The first Patio version expected to contain this behavior, if accepted.
+target-version: TBD
+
+# Component(s) primarily affected by this change.
+areas:
+  - topo
+  - deployment
+  - documentation
+
+# Related issues and pull requests.
+issues:
+  - TBD
+see-also:
+  - doc/motor_registration.md
+replaces:
+  - TBD

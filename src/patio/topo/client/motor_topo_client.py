@@ -33,6 +33,7 @@ failed engine is deregistered within one heartbeat interval.
 """
 
 import os
+import threading
 import time
 import traceback
 import zlib
@@ -41,6 +42,7 @@ from typing import Optional
 import requests
 
 from patio import envs
+from patio.config import EXIT_EVENT
 from patio.logger import init_logger
 from patio.topo.client.base_topo_client import GroupTopoClient
 from patio.topo import utils
@@ -154,7 +156,7 @@ def get_dispatch_capability() -> str:
     InsEventMsg whose dispatch_capabilities is a list, so exactly one value is
     accepted here and it must be one Motor knows.
     """
-    raw = os.getenv("MOTOR_DISPATCH_CAPABILITIES")
+    raw = envs.MOTOR_DISPATCH_CAPABILITIES
     if raw is None:
         return MOTOR_DISPATCH_CAPABILITY
     capabilities = [item.strip() for item in raw.split(",") if item.strip()]
@@ -180,7 +182,7 @@ def get_engine_type() -> str:
     MOTOR_ENGINE_TYPE (e.g. sglang, which the Controller-shaped schema accepts)
     fails at startup instead of at registration.
     """
-    engine_type = (os.getenv("MOTOR_ENGINE_TYPE") or MOTOR_EXTERNAL_ENGINE_TYPE).strip().lower()
+    engine_type = (envs.MOTOR_ENGINE_TYPE or MOTOR_EXTERNAL_ENGINE_TYPE).strip().lower()
     if engine_type != MOTOR_EXTERNAL_ENGINE_TYPE:
         raise ValueError(
             "invalid MOTOR_ENGINE_TYPE {!r}; a Motor sidecar can only register "
@@ -196,6 +198,10 @@ def get_worker_address(worker_info: dict) -> str:
     1. 'instance' field (from --instance-info JSON)
     2. POD_IP env var + worker port
     3. RBG headless DNS (group-role-index.s-group-role:port)
+
+    IPv6 literals are bracketed (``[2001:db8::1]:8000``) so the address stays a
+    single routable endpoint: a bare ``2001:db8::1:8000`` would be parsed with
+    the last hextet as the port and Motor would accept a *wrong* literal.
     """
     if worker_info.get("instance"):
         return worker_info["instance"]
@@ -203,11 +209,11 @@ def get_worker_address(worker_info: dict) -> str:
     port = str(worker_info.get("port", "8000"))
     pod_ip = os.getenv("POD_IP")
     if pod_ip:
-        return "{}:{}".format(pod_ip, port)
+        return format_address(pod_ip, port)
 
-    group_name = os.getenv("RBG_GROUP_NAME")
-    role_name = os.getenv("RBG_ROLE_NAME")
-    role_index = os.getenv("RBG_ROLE_INDEX")
+    group_name = envs.GROUP_NAME
+    role_name = envs.ROLE_NAME
+    role_index = envs.ROLE_INDEX
     if group_name and role_name and role_index:
         return "{}-{}-{}.s-{}-{}:{}".format(
             group_name, role_name, role_index, group_name, role_name, port
@@ -256,16 +262,24 @@ def derive_instance_id(role: str, address: str) -> int:
         digest = crc32(identity) & 0x3FFFFFFF
         return 0x40000000 | digest
 
+    The address is normalized first (``host:port``, IPv6 bracketed), exactly like
+    the payload, so the id always describes the endpoint that is actually
+    registered — a bare hostname (``myhost``) and its canonical form
+    (``myhost:8000``) derive the same id the CLI derives.
+
     A sidecar registers the very same ID for the same role/endpoint pair, so a
     CLI-registered and a sidecar-registered instance are the same instance.
     """
-    identity = "{}|{}".format(role, address.strip())
+    normalized = format_address(*split_address(str(address).strip()))
+    identity = "{}|{}".format(role, normalized)
     digest = zlib.crc32(identity.encode()) & STANDALONE_ID_MASK
     return STANDALONE_ID_NAMESPACE | digest
 
 
 def build_body(event: str, role: str, address: str, instance_id: int,
-               model_name: Optional[str] = None) -> dict:
+               model_name: Optional[str] = None,
+               engine_type: Optional[str] = None,
+               dispatch_capability: Optional[str] = None) -> dict:
     """Build an ExternalInsEventMsg request body for /instances/refresh.
 
     Schema (motor.common.resources.http_msg_spec.ExternalInsEventMsg, the
@@ -277,6 +291,10 @@ def build_body(event: str, role: str, address: str, instance_id: int,
          "instances": [{"id": <int >=1>, "role": "prefill"|"decode",
                         "endpoints": [{"id": <int >=0>, "address": "host:port"}]}]}
 
+    ``engine_type`` / ``dispatch_capability`` default to the validated getters,
+    which lets MotorTopoClient pass the values validated once in __init__ and
+    keeps this function usable on its own in tests.
+
     The schema is ``extra="forbid"``: job name, status, DP size and
     multi-endpoint routing are NOT part of it — Motor derives them in
     ExternalInsEventMsg.to_internal(). A request may not mix this shape with the
@@ -285,8 +303,8 @@ def build_body(event: str, role: str, address: str, instance_id: int,
     host, port = split_address(address)
     body = {
         "event": event,
-        "dispatch_capabilities": get_dispatch_capability(),
-        "engine_type": get_engine_type(),
+        "dispatch_capabilities": dispatch_capability or get_dispatch_capability(),
+        "engine_type": engine_type or get_engine_type(),
         "instances": [
             {
                 "id": instance_id,
@@ -295,10 +313,12 @@ def build_body(event: str, role: str, address: str, instance_id: int,
             }
         ],
     }
-    # Omitting model_name lets Motor probe every reachable DP's /v1/models and
-    # require them to agree; a multi-model engine must state it. Patio sends the
-    # name it resolved at registration time so that deregistration does not
-    # depend on a still-live engine (Motor skips its probe when the name is set).
+    # Motor probes /v1/models on `add` regardless of model_name (it verifies the
+    # name on every reachable DP), so the name is not a way to skip the probe at
+    # registration time. On `del` it is: Motor skips the probe only when the
+    # event carries model_name. Patio therefore sends the name it resolved at
+    # registration time, so deregistration does not depend on a still-live
+    # engine — Motor's fallback probe of a dead engine answers 400.
     if model_name:
         body["model_name"] = model_name
     return body
@@ -307,11 +327,12 @@ def build_body(event: str, role: str, address: str, instance_id: int,
 def _build_health_check_endpoint(worker_info: dict) -> str:
     """Determine the local health-check address.
 
-    Uses POD_IP if available, otherwise falls back to localhost.
+    Uses POD_IP if available, otherwise falls back to localhost. IPv6 POD_IPs
+    are bracketed so ``http://<endpoint>/health`` stays a valid URL.
     """
     port = str(worker_info.get("port", "8000"))
     pod_ip = os.getenv("POD_IP")
-    return "{}:{}".format(pod_ip, port) if pod_ip else "localhost:{}".format(port)
+    return format_address(pod_ip, port) if pod_ip else "localhost:{}".format(port)
 
 
 # ---------------------------------------------------------------------------
@@ -333,9 +354,21 @@ class MotorTopoClient(GroupTopoClient):
         self.mgmt_endpoint = get_motor_endpoint()
         self.mgmt_headers = get_mgmt_headers()
         self.role = detect_worker_type(worker_info)
-        self.address = get_worker_address(worker_info)
+        # Validate the protocol knobs ONCE, at construction: the doc promises a
+        # misconfiguration fails at startup, and register()/unregister() are also
+        # reached from the SIGTERM handler, where raising would skip sys.exit(0)
+        # and suppress the `del` event.
+        self.engine_type = get_engine_type()
+        self.dispatch_capability = get_dispatch_capability()
+        # Canonical address: the payload and the instance id must describe the
+        # same endpoint (a bare host means host:8000 for both).
+        self.address = format_address(*split_address(get_worker_address(worker_info)))
         self.instance_id = derive_instance_id(self.role, self.address)
         self.health_check_endpoint = _build_health_check_endpoint(worker_info)
+        # Serializes `add` and `del`: Motor parses an `add` (probing every DP)
+        # before taking its refresh lock, so a `del` issued meanwhile can be
+        # applied first and leave the instance registered after shutdown.
+        self._lock = threading.Lock()
 
         self._model_name = envs.MOTOR_MODEL_NAME
         # Registration state mirror used by the heartbeat-driven health check:
@@ -432,7 +465,18 @@ class MotorTopoClient(GroupTopoClient):
         longer healthy we deregister the instance (event=del) instead of
         re-adding it, so the Coordinator stops routing traffic to a dead
         endpoint. A recovered engine re-registers on the next healthy call.
+
+        Shutdown-safe: once EXIT_EVENT is set no new `add` is sent, and the
+        `add`/`del` pair is serialized on ``self._lock`` so a `del` cannot be
+        applied before an in-flight `add` and leave a stale registration behind
+        (Motor has no TTL to clean it up).
         """
+        if EXIT_EVENT.is_set():
+            logger.info(
+                "shutdown in progress, not (re-)registering instance %d", self.instance_id
+            )
+            return False
+
         if not self._engine_healthy(worker_info):
             logger.warning(
                 "engine unhealthy at %s, deregistering instance %d (%s) from Motor Coordinator",
@@ -446,26 +490,44 @@ class MotorTopoClient(GroupTopoClient):
         # resolve/cache the model name now — unregister() will reuse it after
         # the engine is gone.
         self._resolve_model_name()
-        body = build_body(
-            event="add",
-            role=self.role,
-            address=self.address,
-            instance_id=self.instance_id,
-            model_name=self._model_name,
-        )
+        try:
+            body = build_body(
+                event="add",
+                role=self.role,
+                address=self.address,
+                instance_id=self.instance_id,
+                model_name=self._model_name,
+                engine_type=self.engine_type,
+                dispatch_capability=self.dispatch_capability,
+            )
+        except Exception as e:
+            # Body construction must never escape: register() is called from the
+            # heartbeat thread and must honour the bool contract.
+            logger.error("failed to build registration body: %s", e)
+            traceback.print_exc()
+            return False
 
-        def _do_register():
+        def _do_register() -> bool:
             mgmt_url = "http://{}/instances/refresh".format(self.mgmt_endpoint)
-            logger.info(
-                "registering instance to Motor Coordinator: %s  body=%s",
-                mgmt_url, body,
-            )
-            resp = requests.post(
-                mgmt_url,
-                json=body,
-                headers=self.mgmt_headers,
-                timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
-            )
+            with self._lock:
+                # A shutdown that began while we waited for the lock must not be
+                # undone by this add.
+                if EXIT_EVENT.is_set():
+                    logger.info(
+                        "shutdown started before the add was sent; not registering instance %d",
+                        self.instance_id,
+                    )
+                    return False
+                logger.info(
+                    "registering instance to Motor Coordinator: %s  body=%s",
+                    mgmt_url, body,
+                )
+                resp = requests.post(
+                    mgmt_url,
+                    json=body,
+                    headers=self.mgmt_headers,
+                    timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
+                )
             if not 200 <= resp.status_code < 300:
                 raise RuntimeError(
                     "register failed, url: {}, status_code: {}, content: {}".format(
@@ -473,9 +535,11 @@ class MotorTopoClient(GroupTopoClient):
                     )
                 )
             logger.info("registered instance %d (%s) successfully", self.instance_id, self.role)
+            return True
 
         try:
-            utils.retry(_do_register, retry_times=60, interval=3)
+            if not utils.retry(_do_register, retry_times=60, interval=3):
+                return False
             self._registered = True
             return True
         except Exception as e:
@@ -487,44 +551,109 @@ class MotorTopoClient(GroupTopoClient):
         """Deregister the engine instance from the Motor Coordinator.
 
         Posts to /instances/refresh with event=del.
-        Carries the cached model name (resolved at register time): Motor
-        requires model_name for del too, and its fallback /v1/models probe
-        would fail against the already-dead engine.
+        Carries the cached model name (resolved at register time): Motor skips
+        its own /v1/models probe only when a `del` carries model_name, and that
+        probe would fail against the already-dead engine (400, which would
+        leave the entry registered).
 
         Bounded by MOTOR_UNREGISTER_DEADLINE instead of the 60x3s registration
         budget: this runs inside the SIGTERM/SIGINT handler (app.py), and the
         equivalent vllm-router operation (POST /remove_worker) is immediate, so
         deregistration must never hold up pod termination. Only transport errors
         and 5xx are retried; a 4xx answer cannot start succeeding, so it stops
-        the loop at once. A 404 means the Coordinator has no such instance
-        (e.g. it restarted) — the desired end state, reported as success.
+        the loop at once.
+
+        A 404 is treated as "already deregistered", but Motor itself does not
+        produce it for an unknown instance: `del` of an unknown id is a logged
+        no-op that returns 200, and the route only answers 400/401/403/409/504.
+        The branch is kept for an intermediary (ingress, gateway) that maps an
+        unknown route to 404 — it is not the normal restart path.
+
+        This method must never raise (it runs in a signal handler). It waits for
+        an in-flight `add` on ``self._lock`` — bounded by the same deadline — so
+        the `del` is always applied after it, and caps each request timeout at
+        the remaining budget so a single slow attempt cannot overshoot it.
         """
         if not self._registered:
             logger.debug("instance %d is not registered, skipping unregister", self.instance_id)
             return True
 
-        body = build_body(
-            event="del",
-            role=self.role,
-            address=self.address,
-            instance_id=self.instance_id,
-            model_name=self._model_name,
-        )
+        if not self._model_name:
+            # Motor will probe /v1/models itself; against a dead engine that is
+            # a 400, i.e. the instance stays registered. Narrow (the local probe
+            # must have failed while Motor's would have succeeded), but worth a
+            # loud line.
+            logger.warning(
+                "no cached model_name for instance %d; Motor will probe the engine "
+                "and may reject the deregistration if it is already gone",
+                self.instance_id,
+            )
+
+        try:
+            body = build_body(
+                event="del",
+                role=self.role,
+                address=self.address,
+                instance_id=self.instance_id,
+                model_name=self._model_name,
+                engine_type=self.engine_type,
+                dispatch_capability=self.dispatch_capability,
+            )
+        except Exception as e:
+            logger.error("failed to build deregistration body: %s", e)
+            traceback.print_exc()
+            return False
+
         mgmt_url = "http://{}/instances/refresh".format(self.mgmt_endpoint)
         deadline = time.monotonic() + envs.MOTOR_UNREGISTER_DEADLINE
+        last_error: Optional[Exception] = None
 
         while True:
-            try:
-                logger.info(
-                    "unregistering instance from Motor Coordinator: %s  body=%s",
-                    mgmt_url, body,
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error(
+                    "failed to unregister instance %d within %.1fs: %s",
+                    self.instance_id, envs.MOTOR_UNREGISTER_DEADLINE, last_error,
                 )
-                resp = requests.post(
-                    mgmt_url,
-                    json=body,
-                    headers=self.mgmt_headers,
-                    timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.MOTOR_UNREGISTER_TIMEOUT),
+                if last_error is not None:
+                    traceback.print_exception(last_error)
+                return False
+
+            resp = None
+            # Serialize with a possible in-flight `add`, but never past the
+            # shutdown budget: Motor parses an `add` before its refresh lock, so
+            # a `del` sent while one is in flight can otherwise be applied first.
+            # Only half of what is left may go to waiting, so an in-flight add
+            # cannot starve the `del` of its whole budget.
+            if not self._lock.acquire(timeout=max(0.0, remaining / 2)):
+                last_error = TimeoutError(
+                    "timed out waiting for an in-flight registration to finish"
                 )
+            else:
+                try:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    # requests' timeout tuple is connect + read, so each phase is
+                    # capped at half of what is left to bound the whole attempt.
+                    timeout = (
+                        max(0.01, min(envs.TOPO_CONNECT_TIMEOUT, remaining / 2)),
+                        max(0.01, min(envs.MOTOR_UNREGISTER_TIMEOUT, remaining / 2)),
+                    )
+                    logger.info(
+                        "unregistering instance from Motor Coordinator: %s  body=%s",
+                        mgmt_url, body,
+                    )
+                    resp = requests.post(
+                        mgmt_url,
+                        json=body,
+                        headers=self.mgmt_headers,
+                        timeout=timeout,
+                    )
+                except Exception as e:
+                    last_error = e
+                finally:
+                    self._lock.release()
+
+            if resp is not None:
                 if 200 <= resp.status_code < 300:
                     logger.info(
                         "unregistered instance %d (%s) successfully", self.instance_id, self.role
@@ -546,22 +675,15 @@ class MotorTopoClient(GroupTopoClient):
                         mgmt_url, resp.status_code, resp.text,
                     )
                     return False
-                raise RuntimeError(
+                last_error = RuntimeError(
                     "unregister failed, url: {}, status_code: {}, content: {}".format(
                         mgmt_url, resp.status_code, resp.text
                     )
                 )
-            except Exception as e:
-                last_error = e
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                logger.error(
-                    "failed to unregister instance %d within %.1fs: %s",
-                    self.instance_id, envs.MOTOR_UNREGISTER_DEADLINE, last_error,
-                )
-                traceback.print_exception(last_error)
-                return False
+                continue  # the top of the loop reports the timeout
             interval = min(envs.MOTOR_UNREGISTER_INTERVAL, remaining)
             logger.warning(
                 "unregister attempt failed (%s), retrying in %.1fs", last_error, interval

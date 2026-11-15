@@ -5,11 +5,14 @@ Tests for the MindIE Motor topo client (MotorTopoClient).
 from importlib import reload
 from unittest.mock import MagicMock, patch
 
+import threading
 import time
 
 from patio import envs
+from patio.config import EXIT_EVENT
 from patio.topo.client.motor_topo_client import (
     MotorTopoClient,
+    _build_health_check_endpoint,
     build_body,
     derive_instance_id,
     detect_worker_type,
@@ -153,17 +156,34 @@ def test_get_worker_address_uses_pod_ip(monkeypatch):
 
 def test_get_worker_address_uses_rbg_dns(monkeypatch):
     monkeypatch.delenv("POD_IP", raising=False)
-    monkeypatch.setenv("RBG_GROUP_NAME", "demo")
-    monkeypatch.setenv("RBG_ROLE_NAME", "decode")
-    monkeypatch.setenv("RBG_ROLE_INDEX", "2")
+    monkeypatch.setattr(envs, "GROUP_NAME", "demo")
+    monkeypatch.setattr(envs, "ROLE_NAME", "decode")
+    monkeypatch.setattr(envs, "ROLE_INDEX", "2")
     assert get_worker_address({"port": 8102}) == "demo-decode-2.s-demo-decode:8102"
+
+
+def test_get_worker_address_uses_pod_ip_for_ipv4(monkeypatch):
+    monkeypatch.setenv("POD_IP", "10.0.0.8")
+    assert get_worker_address({"port": 8102}) == "10.0.0.8:8102"
+
+
+def test_get_worker_address_brackets_ipv6_pod_ip(monkeypatch):
+    """A bare ``2001:db8::1:8102`` would be parsed with the last hextet as the
+    port; Motor accepts that literal but routes to a wrong endpoint."""
+    monkeypatch.setenv("POD_IP", "2001:db8::1")
+    assert get_worker_address({"port": 8102}) == "[2001:db8::1]:8102"
+
+
+def test_health_check_endpoint_brackets_ipv6_pod_ip(monkeypatch):
+    monkeypatch.setenv("POD_IP", "2001:db8::1")
+    assert _build_health_check_endpoint({"port": 8102}) == "[2001:db8::1]:8102"
 
 
 def test_get_worker_address_raises_without_any_source(monkeypatch):
     monkeypatch.delenv("POD_IP", raising=False)
-    monkeypatch.delenv("RBG_GROUP_NAME", raising=False)
-    monkeypatch.delenv("RBG_ROLE_NAME", raising=False)
-    monkeypatch.delenv("RBG_ROLE_INDEX", raising=False)
+    monkeypatch.setattr(envs, "GROUP_NAME", None)
+    monkeypatch.setattr(envs, "ROLE_NAME", None)
+    monkeypatch.setattr(envs, "ROLE_INDEX", None)
 
     import pytest
     with pytest.raises(RuntimeError, match="cannot determine worker address"):
@@ -771,7 +791,7 @@ def test_detect_worker_type_still_requires_a_role():
 
 
 def test_get_engine_type_defaults_to_vllm(monkeypatch):
-    monkeypatch.delenv("MOTOR_ENGINE_TYPE", raising=False)
+    monkeypatch.setattr(envs, "MOTOR_ENGINE_TYPE", None)
     assert get_engine_type() == "vllm"
     assert build_body("add", "prefill", "10.0.0.1:8000", 1, "m")["engine_type"] == "vllm"
 
@@ -780,7 +800,7 @@ def test_get_engine_type_rejects_engines_the_external_protocol_cannot_serve(monk
     """The External Deployer protocol is vllm-only ("currently supports
     engine_type='vllm' only"); sglang belongs to the Controller-shaped schema."""
     for engine in (" SGLang ", "tgi"):
-        monkeypatch.setenv("MOTOR_ENGINE_TYPE", engine)
+        monkeypatch.setattr(envs, "MOTOR_ENGINE_TYPE", engine)
         try:
             get_engine_type()
         except ValueError as exc:
@@ -789,20 +809,45 @@ def test_get_engine_type_rejects_engines_the_external_protocol_cannot_serve(monk
             raise AssertionError(f"engine {engine!r} must be rejected")
 
 
+def test_init_rejects_invalid_engine_type_at_construction(monkeypatch):
+    """A value Motor cannot accept must fail at startup, not at registration:
+    register()/unregister() are also reached from the SIGTERM handler, where a
+    ValueError would skip sys.exit(0) and suppress the `del` event."""
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    monkeypatch.setattr(envs, "MOTOR_ENGINE_TYPE", "sglang")
+
+    import pytest
+    with pytest.raises(ValueError, match="invalid MOTOR_ENGINE_TYPE"):
+        MotorTopoClient({"type": "prefill", "port": 8000})
+
+
+def test_init_rejects_invalid_dispatch_plan_at_construction(monkeypatch):
+    _set_motor_env(monkeypatch)
+    monkeypatch.setenv("POD_IP", "10.0.0.1")
+    reload(envs)
+    monkeypatch.setattr(envs, "MOTOR_DISPATCH_CAPABILITIES", "decode_colocation")
+
+    import pytest
+    with pytest.raises(ValueError, match="invalid MOTOR_DISPATCH_CAPABILITIES"):
+        MotorTopoClient({"type": "prefill", "port": 8000})
+
+
 def test_dispatch_capability_defaults_to_vllm_handoff(monkeypatch):
-    monkeypatch.delenv("MOTOR_DISPATCH_CAPABILITIES", raising=False)
+    monkeypatch.setattr(envs, "MOTOR_DISPATCH_CAPABILITIES", None)
     assert get_dispatch_capability() == "prefill_handoff_decode"
     body = build_body("add", "decode", "10.0.0.2:8000", 2, "m")
     assert body["dispatch_capabilities"] == "prefill_handoff_decode"
 
 
 def test_dispatch_capability_override(monkeypatch):
-    monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", " concurrent_engine_sync ")
+    monkeypatch.setattr(envs, "MOTOR_DISPATCH_CAPABILITIES", " concurrent_engine_sync ")
     assert get_dispatch_capability() == "concurrent_engine_sync"
 
-    # empty override == "let Motor assume the vLLM default" (HANDOFF)
+    # empty override falls back to the vLLM default (HANDOFF)
     for empty in ("  ", ""):
-        monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", empty)
+        monkeypatch.setattr(envs, "MOTOR_DISPATCH_CAPABILITIES", empty)
         assert get_dispatch_capability() == "prefill_handoff_decode"
 
 
@@ -810,7 +855,7 @@ def test_dispatch_capability_rejects_multiple_or_unknown_plans(monkeypatch):
     """The external schema carries exactly one plan from a closed set: a list
     (Controller shape) or a plan Motor does not implement is rejected server-side."""
     for raw in ("concurrent_engine_sync, decode_colocation", "decode_colocation"):
-        monkeypatch.setenv("MOTOR_DISPATCH_CAPABILITIES", raw)
+        monkeypatch.setattr(envs, "MOTOR_DISPATCH_CAPABILITIES", raw)
         try:
             get_dispatch_capability()
         except ValueError as exc:
@@ -827,3 +872,182 @@ def test_build_body_is_self_consistent_for_deregistration():
     assert {k: v for k, v in add.items() if k != "event"} == {
         k: v for k, v in delete.items() if k != "event"
     }
+
+
+# ---------------------------------------------------------------------------
+# address canonicalization (id and payload must describe the same endpoint)
+# ---------------------------------------------------------------------------
+
+def test_derive_instance_id_normalizes_bare_host_and_ipv6():
+    assert derive_instance_id("prefill", "myhost") == derive_instance_id(
+        "prefill", "myhost:8000"
+    )
+    assert derive_instance_id("prefill", "2001:db8::1") == derive_instance_id(
+        "prefill", "[2001:db8::1]:8000"
+    )
+
+
+def test_init_normalizes_a_bare_instance_address(monkeypatch):
+    """A bare hostname must be advertised as host:8000, the same form the id is
+    derived from — otherwise the payload and the id disagree (and the id no
+    longer matches the Motor CLI's, which always sees host:port)."""
+    _set_motor_env(monkeypatch)
+    client = _make_client(
+        monkeypatch, worker_info={"type": "prefill", "instance": "myhost"}
+    )
+    assert client.address == "myhost:8000"
+    body = build_body("add", "prefill", client.address, client.instance_id)
+    assert body["instances"][0]["endpoints"][0]["address"] == "myhost:8000"
+    assert client.instance_id == derive_instance_id("prefill", "myhost:8000")
+
+
+def test_init_brackets_ipv6_pod_ip(monkeypatch):
+    _set_motor_env(monkeypatch)
+    client = _make_client(monkeypatch, pod_ip="2001:db8::1")
+    assert client.address == "[2001:db8::1]:8000"
+    assert client.health_check_endpoint == "[2001:db8::1]:8000"
+    body = build_body("add", "prefill", client.address, client.instance_id)
+    assert body["instances"][0]["endpoints"][0]["address"] == "[2001:db8::1]:8000"
+
+
+# ---------------------------------------------------------------------------
+# shutdown safety: EXIT_EVENT gate + add/del serialization
+# ---------------------------------------------------------------------------
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+@patch("patio.topo.client.motor_topo_client.requests.get")
+def test_register_skips_add_once_shutdown_started(mock_get, mock_post, monkeypatch):
+    _set_motor_env(monkeypatch)
+    client = _make_client(monkeypatch)
+    health = MagicMock()
+    health.status_code = 200
+    mock_get.return_value = health
+
+    EXIT_EVENT.set()
+    try:
+        assert client.register("", {"type": "prefill", "port": 8000}) is False
+    finally:
+        EXIT_EVENT.clear()
+
+    mock_post.assert_not_called()
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_unregister_waits_for_in_flight_add(mock_post, monkeypatch):
+    """Motor parses an `add` before taking its refresh lock, so a `del` sent
+    while one is in flight can be applied first and leave the instance in the
+    pool. add/del are serialized: the del must not be posted before the add
+    returns."""
+    client = _make_registered_client(monkeypatch)
+    monkeypatch.setattr(envs, "MOTOR_UNREGISTER_DEADLINE", 5.0)
+
+    add_started = threading.Event()
+    release_add = threading.Event()
+    events = []
+
+    ok = MagicMock()
+    ok.status_code = 200
+    ok.text = "ok"
+
+    def _post(url, json=None, **kwargs):
+        events.append(json["event"])
+        if json["event"] == "add":
+            add_started.set()
+            assert release_add.wait(5)
+        return ok
+
+    mock_post.side_effect = _post
+    with patch("patio.topo.client.motor_topo_client.requests.get") as mock_get:
+        mock_get.return_value = ok        # health probe passes
+        add_thread = threading.Thread(
+            target=lambda: client.register("", {"type": "prefill", "port": 8000})
+        )
+        add_thread.start()
+        assert add_started.wait(5)
+
+        del_thread = threading.Thread(target=client.unregister)
+        del_thread.start()
+        time.sleep(0.1)
+        assert events == ["add"], "del must wait for the in-flight add"
+
+        release_add.set()
+        add_thread.join(5)
+        del_thread.join(5)
+
+    assert events == ["add", "del"]
+
+
+# ---------------------------------------------------------------------------
+# body construction must never escape the bool contract
+# ---------------------------------------------------------------------------
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+@patch("patio.topo.client.motor_topo_client.requests.get")
+def test_register_returns_false_when_body_build_fails(mock_get, mock_post, monkeypatch):
+    _set_motor_env(monkeypatch)
+    client = _make_client(monkeypatch)
+    health = MagicMock()
+    health.status_code = 200
+    mock_get.return_value = health
+
+    with patch(
+        "patio.topo.client.motor_topo_client.build_body",
+        side_effect=ValueError("bad body"),
+    ):
+        assert client.register("", {"type": "prefill", "port": 8000}) is False
+    mock_post.assert_not_called()
+
+    client = _make_registered_client(monkeypatch)
+    with patch(
+        "patio.topo.client.motor_topo_client.build_body",
+        side_effect=ValueError("bad body"),
+    ):
+        assert client.unregister() is False
+
+
+# ---------------------------------------------------------------------------
+# shutdown budget: a single attempt must not overshoot the deadline
+# ---------------------------------------------------------------------------
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_unregister_caps_request_timeout_to_remaining_budget(mock_post, monkeypatch):
+    client = _make_registered_client(monkeypatch)
+    monkeypatch.setattr(envs, "MOTOR_UNREGISTER_DEADLINE", 1.0)
+    monkeypatch.setattr(envs, "MOTOR_UNREGISTER_TIMEOUT", 5.0)
+    seen = []
+
+    def _post(url, json=None, timeout=None, **kwargs):
+        seen.append(timeout)
+        raise RuntimeError("hang")
+
+    mock_post.side_effect = _post
+
+    started = time.monotonic()
+    assert client.unregister() is False
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.6, f"unregister overshot its 1.0s budget: {elapsed:.2f}s"
+    assert seen, "no attempt was made"
+    # requests' timeout tuple is connect + read; each phase is half the budget.
+    for connect, read in seen:
+        assert connect <= 0.5 + 1e-6
+        assert read <= 0.5 + 1e-6
+
+
+@patch("patio.topo.client.motor_topo_client.requests.post")
+def test_unregister_does_not_let_an_add_starve_it_of_the_whole_budget(mock_post, monkeypatch):
+    """Waiting for an in-flight add is capped at half the remaining budget, so a
+    slow add still leaves an attempt for the del and the deadline holds."""
+    client = _make_registered_client(monkeypatch)
+    monkeypatch.setattr(envs, "MOTOR_UNREGISTER_DEADLINE", 0.6)
+
+    client._lock.acquire()  # simulate an add that is in flight the whole time
+    try:
+        started = time.monotonic()
+        assert client.unregister() is False
+        elapsed = time.monotonic() - started
+    finally:
+        client._lock.release()
+
+    assert elapsed < 1.2, f"unregister overshot its 0.6s budget: {elapsed:.2f}s"
+    mock_post.assert_not_called()

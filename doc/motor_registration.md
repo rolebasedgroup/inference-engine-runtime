@@ -16,7 +16,7 @@ the full instance lifecycle in the router:
 
 | Phase | Patio call | Wire effect |
 | --- | --- | --- |
-| Engine ready | `MotorTopoClient.register(topo_type, worker_info)` | `POST /instances/refresh` with `event=add` |
+| Engine ready | `MotorTopoClient.register(url, worker_info)` | `POST /instances/refresh` with `event=add` |
 | Periodic heartbeat | same `register(...)` call | `POST /instances/refresh` with `event=add` (idempotent no-op) |
 | Engine unhealthy | `register(...)` returns `False` after deregistering | `POST /instances/refresh` with `event=del` |
 | SIGTERM / SIGINT | `MotorTopoClient.unregister()` | `POST /instances/refresh` with `event=del` |
@@ -65,6 +65,46 @@ Adding a second, vLLM-proxy-shaped way into the same pools was rejected because
 it would carry *less* information than Motor's own model (no role, no dispatch
 plan, no multi-endpoint groups) and would leave two paths into the pools with no
 single source of truth for validation.
+
+## The standalone deployment this targets
+
+Motor's official guide is the *Coordinator 独立部署* (standalone Coordinator) page.
+What a Patio deployment must match:
+
+* **Ports**: 1025 inference traffic, **1026 management** (`ROUTER_PORT` must point
+  here), 1027 observability.
+* **Registration entry point**: the Coordinator CLI,
+  `python3 -m motor.coordinator.register [set|add|del|list] --prefill IP:PORT[,IP:PORT…] --decode …`,
+  with optional `--model-name`, `--mgmt-api-key-file`, `--coordinator` and
+  `--dry-run`. It posts the same `ExternalInsEventMsg` shape to the same
+  `POST /instances/refresh` endpoint the sidecar uses — the sidecar is simply a
+  per-pod replacement for that CLI, which is why both derive the instance id the
+  same way.
+* **Management API key**: off by default. Enable it in the Coordinator config
+  (`mgmt_api_key_config.enable_api_key` / `api_key_file`); Patio then sends
+  `X-Motor-Management-Key` from `MOTOR_MGMT_API_KEY_FILE`.
+* **Bind address**: the Coordinator binds `127.0.0.1` unless `POD_IP` is injected
+  or `coordinator_api_host` is set. Without one of those, Patio's headless-DNS
+  endpoint cannot reach port 1026 in another pod — the registration would fail
+  with a connection error even though both containers are healthy.
+* A standalone Coordinator serves **a single model**, which is why the event
+  carries one optional shared `model_name`.
+
+Minimal external event (all Patio actually needs to state):
+
+```json
+{
+  "event": "add",
+  "instances": [
+    {"id": 1166527670, "role": "prefill",
+     "endpoints": [{"id": 0, "address": "10.10.0.11:8000"}]}
+  ]
+}
+```
+
+`model_name`, `dispatch_capabilities` and `engine_type` are optional on the wire;
+Patio sends them so the instance record does not depend on the Coordinator's
+defaults.
 
 ## Wire contract
 
@@ -119,11 +159,18 @@ Notes that matter on the wire:
   `[2001:db8::1]:8200`); the port must be in `1..65535`. This is the flat form —
   not the `{pod_ip: {endpoint_id: Endpoint}}` map of the Controller schema, whose
   `Endpoint` carries `ip` + string `business_port` separately.
-* `model_name` omitted → Motor asks **every reachable DP** for `/v1/models`
-  (2 s per endpoint) and requires them to agree on a single model; unreachable
-  instances are dropped from the event. `model_name` provided → no probe is made,
-  which is why `del` carries the name resolved at registration time: shutdown
-  must not depend on an engine that is already gone.
+* `model_name` omitted on `add` → Motor asks **every reachable DP** for
+  `/v1/models` (2 s per endpoint) and requires them to agree on a single model;
+  unreachable instances are dropped from the event. Supplying `model_name` on
+  `add` does **not** skip the probe: Motor verifies that every reachable DP
+  advertises the name. Patio therefore resolves the name locally first (env or
+  the local engine's `/v1/models`) and sends it, so the payload states what the
+  sidecar already knows.
+* `model_name` is what makes `del` independent of the engine: Motor skips its
+  `/v1/models` probe only for a `del` that carries the name. Without it, a `del`
+  sent after the engine died answers `400 no reachable native engine /v1/models`
+  and the entry stays registered. This is why Patio caches the name resolved at
+  registration time and reuses it at shutdown.
 * Only `add` / `del` are used by a sidecar. `set` makes the pools contain
   *exactly* the submitted set, so a per-instance client must never use it in a
   multi-instance deployment — it would drop every other instance. (A sidecar
@@ -163,6 +210,12 @@ identity = "|".join([role, "ip:port", ...])          # endpoints sorted by (ip, 
 instance_id = 0x40000000 | (zlib.crc32(identity.encode()) & 0x3FFFFFFF)
 ```
 
+A sidecar always registers exactly one endpoint, so its identity is simply
+`"<role>|<host>:<port>"`. The address is canonicalized before hashing
+(`format_address(*split_address(address))`): a bare host becomes `host:8000` and
+an IPv6 literal is bracketed (`[2001:db8::1]:8000`), which is also the form the
+CLI hashes — so both surfaces agree for those inputs too.
+
 The namespace bit (`0x40000000`) keeps sidecar/CLI ids out of the range used by
 Controller-pushed instances.
 
@@ -193,7 +246,10 @@ engine ready ──► wait_engine_ready()  (own /health gate)
 pod termination:
 
 * `2xx` → success.
-* `404` → the instance is already gone; treated as success (idempotent).
+* `404` → treated as "already deregistered". Motor itself returns `200` for a
+  `del` of an unknown instance and only answers `400`/`401`/`403`/`409`/`504`,
+  so this branch is defensive (an ingress or gateway deciding a route does not
+  exist), not the Coordinator-restart path.
 * other `4xx` → a deterministic client error; log and return `False` immediately
   instead of retrying.
 * transport error / `5xx` → retry with `MOTOR_UNREGISTER_INTERVAL` until
@@ -205,6 +261,19 @@ Before this was bounded, `unregister()` reused the registration retry policy
 against a Coordinator that was itself gone. `MOTOR_UNREGISTER_DEADLINE` must stay
 well below the pod's `terminationGracePeriodSeconds`.
 
+The signal handler is installed *before* `uvicorn.run()`, so deregistration on
+SIGTERM depends on uvicorn restoring a custom SIGTERM handler and re-raising the
+signal after its graceful drain. That cooperative behaviour exists from
+**uvicorn 0.29** (encode/uvicorn#1600); with 0.28 the handler is never called and
+the process exits without a `del`. `pyproject.toml` therefore requires
+`uvicorn>=0.29`. Even then the handler runs only after the drain, so heartbeats
+keep posting `add` until that point — `EXIT_EVENT` plus the add/del lock in the
+client close that window.
+
+Shutdown and health-driven deregistration are deliberately different paths:
+`EXIT_EVENT` starts no new `add`, while the health path may re-register once the
+engine recovers, so it never consults the flag.
+
 ## Configuration
 
 | Env | Default | Meaning |
@@ -212,10 +281,10 @@ well below the pod's `terminationGracePeriodSeconds`.
 | `TOPO_TYPE` | – | set to `Motor` to select this client |
 | `ROUTER_ROLE_NAME` | – | router/Coordinator role name in the RBG headless service |
 | `ROUTER_PORT` | – | Motor **management** port (1026 by default) |
-| `MOTOR_MODEL_NAME` | probe `GET /v1/models` | model name registered with Motor; set it when the engine is unreachable at shutdown, or when a DP serves several models |
+| `MOTOR_MODEL_NAME` | probe the local `GET /v1/models` | model name registered with Motor; when unset, Patio probes the engine itself and only falls back to letting Motor probe if that fails |
 | `MOTOR_MGMT_API_KEY_FILE` | – | file holding the `X-Motor-Management-Key` value |
 | `MOTOR_ENGINE_TYPE` | `vllm` | engine family advertised to Motor; only `vllm` is accepted by the External Deployer protocol |
-| `MOTOR_DISPATCH_CAPABILITIES` | `prefill_handoff_decode` | the single `DispatchPlan` value for this deployment (`prefill_handoff_decode` / `concurrent_engine_sync`); empty means "let Motor assume the vLLM HANDOFF default" |
+| `MOTOR_DISPATCH_CAPABILITIES` | `prefill_handoff_decode` | the single `DispatchPlan` value for this deployment (`prefill_handoff_decode` / `concurrent_engine_sync`); an empty value sends `prefill_handoff_decode` explicitly (Motor's own default), so behaviour does not depend on the Coordinator's defaults |
 | `MOTOR_UNREGISTER_DEADLINE` | `10` | seconds, total shutdown deregistration budget |
 | `MOTOR_UNREGISTER_INTERVAL` | `1` | seconds between shutdown attempts |
 | `MOTOR_UNREGISTER_TIMEOUT` | `3` | per-request timeout during shutdown |
@@ -231,6 +300,8 @@ startup in the Patio client.
 | Situation | Behaviour |
 | --- | --- |
 | Coordinator not up yet | registration retries (`utils.retry`, 60 × 3s) like the vLLM client |
+| Coordinator answers a deterministic `4xx` on `add` | also retried by the shared policy (60 × 3s); the next heartbeat would retry anyway, so fail-fast is a follow-up, not a correctness issue |
+| SIGTERM while an `add` is in flight | no new `add` starts, the shutdown `del` waits (half the budget) for the in-flight one, then is sent |
 | Coordinator gone at shutdown | deregistration gives up after `MOTOR_UNREGISTER_DEADLINE` |
 | Engine died but sidecar alive | heartbeat sees `/health` fail → `del`; traffic stops |
 | Pod hard-killed (SIGKILL/OOM) | `del` never sent — see below |
@@ -286,11 +357,15 @@ Patio client additionally rejects an invalid role locally, before any HTTP call.
 ## Verification
 
 * `tests/mock_tests/test_motor_topo_client.py` — payload shape (including the
-  "never mix shapes" invariant), id derivation, the three protocol restrictions,
-  address formatting (IPv4 / DNS / IPv6), register/heartbeat behaviour,
-  failure-driven deregistration, and the bounded, fail-fast shutdown path
-  (`404` → success, other `4xx` → immediate failure, `5xx`/transport → retried
-  until the deadline).
+  "never mix shapes" invariant), id derivation and address canonicalization, the
+  three protocol restrictions (validated at construction), address formatting
+  (IPv4 / DNS / IPv6, including a bracketed IPv6 `POD_IP` in both the payload and
+  the `/health` endpoint), register/heartbeat behaviour, failure-driven
+  deregistration, and the bounded, fail-fast shutdown path (`404` → success,
+  other `4xx` → immediate failure, `5xx`/transport → retried until the deadline,
+  per-attempt timeout capped at the remaining budget). The shutdown race has its
+  own cases: no `add` after `EXIT_EVENT`, and a `del` blocked until an in-flight
+  `add` returns.
 * `MindIE-Motor/tests/coordinator/api_server/test_management_server_instances.py`
   — the same contract against Motor's real HTTP surface and real
   `InstanceManager`: add → `GET /instances` → idempotent re-add → del →

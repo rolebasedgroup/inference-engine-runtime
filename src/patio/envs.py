@@ -35,6 +35,11 @@ _topo_register_endpoint = os.getenv("TOPO_REGISTER_ENDPOINT")
 # SGLang router / vLLM proxy; its endpoint derives from ROUTER_ROLE_NAME/ROUTER_PORT)
 MOTOR_MGMT_API_KEY_FILE = os.getenv("MOTOR_MGMT_API_KEY_FILE")
 MOTOR_MODEL_NAME = os.getenv("MOTOR_MODEL_NAME")
+# Protocol knobs. The External Deployer schema is vllm-only and carries a single
+# P/D dispatch plan; both are validated client-side so a value Motor cannot
+# accept fails at construction instead of at registration.
+MOTOR_ENGINE_TYPE = os.getenv("MOTOR_ENGINE_TYPE")
+MOTOR_DISPATCH_CAPABILITIES = os.getenv("MOTOR_DISPATCH_CAPABILITIES")
 
 # Deregistration budget. unregister() runs inside the SIGTERM/SIGINT handler, so
 # it is bounded by a deadline instead of the 60x3s registration retry budget:
