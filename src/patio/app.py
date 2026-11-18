@@ -2,6 +2,7 @@
 # @Author: zibai.gj
 import argparse
 import json
+import os
 import signal
 import sys
 import threading
@@ -11,6 +12,7 @@ from urllib.parse import urljoin
 from prometheus_client import REGISTRY
 
 from patio import envs
+from patio.application import PatioApplication, parse_worker_instance_info
 from patio.api.server_router import server_router
 from patio.api.lora_router import lora_router
 from patio.config import DEFAULT_PATIO_PORT, EXCLUDE_ENDPOINTS, EXIT_EVENT
@@ -34,6 +36,7 @@ app.include_router(server_router)
 app.include_router(lora_router)
 
 topo_client: GroupTopoClient = None
+patio_application: PatioApplication | None = None
 
 
 # Middleware to collect metrics
@@ -138,6 +141,36 @@ def run_topo_client(worker_instance_info: str) -> GroupTopoClient:
         sys.exit(1)
 
 
+def _configure_event_application(
+    worker_instance_info: str,
+    events_config: str,
+    logger,
+) -> None:
+    """Create the event application and register FastAPI lifecycle handlers."""
+
+    worker_info, topo_type = parse_worker_instance_info(worker_instance_info)
+    application = PatioApplication(
+        worker_info=worker_info,
+        topo_type=topo_type,
+        events_config=events_config,
+    )
+    global patio_application
+    patio_application = application
+
+    @app.on_event("startup")
+    async def start_event_application() -> None:
+        await application.start()
+
+    @app.on_event("shutdown")
+    async def stop_event_application() -> None:
+        await application.stop()
+
+    logger.info(
+        "event callback application configured",
+        extra={"events_config": events_config, "topo_type": topo_type},
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run patio runtime server")
     parser.add_argument(
@@ -151,6 +184,12 @@ def main():
         "--port", type=int, default=DEFAULT_PATIO_PORT, help="Port to listen on"
     )
     parser.add_argument("--instance-info", type=str, default="", help="instance info")
+    parser.add_argument(
+        "--events-config",
+        type=str,
+        default=os.getenv("EVENTS_CONFIG", ""),
+        help="Path to events.yaml; when set, startup and shutdown use event callbacks",
+    )
     parser.add_argument(
         "--scrape-engine-metrics",
         type=bool,
@@ -169,9 +208,21 @@ def main():
     logger = init_logger(__name__)
     logger.info("Use %s to start up runtime server", args)
 
+    if args.events_config and not args.instance_info:
+        logger.error(
+            "--events-config requires --instance-info to select the engine and worker"
+        )
+        sys.exit(1)
+
     _init_metrics(args.scrape_engine_metrics)
 
-    if args.instance_info:
+    if args.instance_info and args.events_config:
+        try:
+            _configure_event_application(args.instance_info, args.events_config, logger)
+        except Exception as exc:
+            logger.error("Failed to configure event callbacks: %s", exc)
+            sys.exit(1)
+    elif args.instance_info:
         run_topo_client(args.instance_info)
 
     # Run the server

@@ -11,6 +11,7 @@ Patio is a lightweight FastAPI server that runs alongside inference engine conta
 - **LoRA Adapter Management** — Dynamically load and unload LoRA adapters at runtime without restarting the engine
 - **Unified Prometheus Metrics** — Scrape, normalize, and re-expose inference engine metrics with a `patio:` prefix
 - **Distributed Topology Management** — Register workers with a central router, heartbeat-based recovery, and graceful shutdown
+- **Event Callbacks** — Configure `start`, `hook`, and `end` operations in `events.yaml` without changing Patio code
 - **Health Check & Readiness** — Standard Kubernetes liveness and readiness probes
 
 ## Architecture
@@ -87,6 +88,30 @@ For vLLM proxy registration, set `TOPO_TYPE` to `vLLM` and point
 `ROUTER_ROLE_NAME` / `ROUTER_PORT` at the proxy service. Patio registers workers
 with the proxy using `/instances/add`.
 
+### Event Callbacks
+
+Patio can run engine-specific operations as named callbacks. Configure the
+event sequence in `events.yaml` and pass the file with `--events-config` or the
+`EVENTS_CONFIG` environment variable:
+
+```yaml
+event_callbacks:
+  start:
+    - engine_wait_ready
+    - router_onboard
+
+  hook:
+    - signal: "patio.com/router=offboard"
+      callback: router_offboard
+
+  end:
+    - router_offboard
+```
+
+`start` and `end` run in configuration order at process startup and shutdown.
+`hook` entries are checked in configuration order whenever the matching
+`signal` is present. Patio clears the signal after the callback succeeds.
+
 ## Quick Start
 
 ### Prerequisites
@@ -132,6 +157,7 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `--log-level` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `--enable-fastapi-docs` | `false` | Enable FastAPI documentation endpoints |
 | `--scrape-engine-metrics` | `true` | Enable scraping of engine metrics |
+| `--events-config` | none | Path to `events.yaml`; enables event callbacks |
 
 ### Environment Variables
 
@@ -150,6 +176,7 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `ROLE_NAME` | RBG role name | `None` |
 | `ROLE_INDEX` | RBG role index | `None` |
 | `HEARTBEAT_INTERVAL` | Topology heartbeat interval (seconds) | `30` |
+| `EVENTS_CONFIG` | Path to the event callback configuration file | `None` |
 
 ## Usage with RoleBasedGroup
 
