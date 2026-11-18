@@ -112,6 +112,31 @@ event_callbacks:
 `hook` entries are checked in configuration order whenever the matching
 `signal` is present. Patio clears the signal after the callback succeeds.
 
+#### Reading signals from a downwardAPI file
+
+By default Patio polls the RoleInstance labels through the Kubernetes API.
+When RBG syncs the RoleInstance `signalLabel` values onto the Pod labels,
+Patio can read them from a downwardAPI projection instead:
+
+```yaml
+volumes:
+- name: podinfo
+  downwardAPI:
+    items:
+    - path: pod-labels
+      fieldRef:
+        fieldPath: metadata.labels
+```
+
+Set `LIFECYCLE_SIGNAL_SOURCE=file` to enable this mode. Reading from the
+file removes the per-second API polling; clearing a signal still goes through
+the API, because the downwardAPI file is read-only. After Patio clears the
+signal on the RoleInstance, RBG removes the Pod label and the kubelet
+refreshes the file (typically within a few seconds). Until the file is
+refreshed, Patio may observe the signal again, so hook callbacks must be
+idempotent.
+
+
 ## Docker Image
 
 Patio is designed to run as a sidecar container next to the inference engine.
@@ -199,6 +224,9 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `ROLE_INDEX` | RBG role index | `None` |
 | `HEARTBEAT_INTERVAL` | Topology heartbeat interval (seconds) | `30` |
 | `EVENTS_CONFIG` | Path to the event callback configuration file | `None` |
+| `LIFECYCLE_SIGNAL_SOURCE` | How hook signals are read: `kubernetes` (API polling) or `file` (downwardAPI label file) | `kubernetes` |
+| `LIFECYCLE_SIGNAL_FILE` | Label file path for `LIFECYCLE_SIGNAL_SOURCE=file` | `/etc/patio/pod-labels` |
+| `LIFECYCLE_API_TIMEOUT` | Kubernetes API request timeout for signal reads and clears (seconds) | `10` |
 
 ## Usage with RoleBasedGroup
 

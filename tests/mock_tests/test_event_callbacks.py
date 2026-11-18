@@ -13,6 +13,7 @@ from patio.events.registry import register_callback, reset_callback_registry
 from patio.application import PatioApplication, parse_worker_instance_info
 from patio.adapters.engine.sglang import SGLangEngineProbe
 from patio.adapters.router.sglang import SGLangRouterAdapter
+from patio.lifecycle.signal_file import FileSignalSource, parse_downward_labels
 from patio.lifecycle.signal_label import KubernetesSignalLabelSource
 
 
@@ -716,3 +717,120 @@ async def test_event_executor_notifies_hook_processed():
 
     assert await executor.run_once() == 1
     assert notified == ["patio.com/router=offboard"]
+
+
+def test_parse_downward_labels():
+    content = '\n'.join(
+        [
+            'patio.com/router="offboard"',
+            'rbg.workloads.x-k8s.io/role-name="engine"',
+            'topology.kubernetes.io/zone="cn-shanghai-n"',
+            'patio.com/escaped="say \\"hi\\" now"',
+            'patio.com/backslash="path\\\\name"',
+            '# not a label',
+            'novalue=',
+            '',
+        ]
+    )
+
+    assert parse_downward_labels(content) == {
+        "patio.com/router=offboard",
+        "rbg.workloads.x-k8s.io/role-name=engine",
+        "topology.kubernetes.io/zone=cn-shanghai-n",
+        'patio.com/escaped=say "hi" now',
+        "patio.com/backslash=path\\name",
+    }
+
+
+@pytest.mark.asyncio
+async def test_file_signal_source_reads_labels_file(tmp_path: Path):
+    path = tmp_path / "pod-labels"
+    path.write_text('patio.com/router="offboard"\n', encoding="utf-8")
+
+    class FakeClearSource:
+        def __init__(self):
+            self.cleared: list[str] = []
+
+        async def clear(self, signal: str) -> None:
+            self.cleared.append(signal)
+
+    clear_source = FakeClearSource()
+    source = FileSignalSource(labels_path=path, clear_source=clear_source)
+
+    assert await source.signals() == {"patio.com/router=offboard"}
+
+    await source.clear("patio.com/router=offboard")
+    assert clear_source.cleared == ["patio.com/router=offboard"]
+
+
+@pytest.mark.asyncio
+async def test_file_signal_source_missing_file_is_empty(tmp_path: Path):
+    class FakeClearSource:
+        async def clear(self, signal: str) -> None:
+            raise AssertionError("should not be called")
+
+    source = FileSignalSource(
+        labels_path=tmp_path / "missing", clear_source=FakeClearSource()
+    )
+
+    assert await source.signals() == set()
+
+
+def test_application_selects_file_signal_source(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("LIFECYCLE_RI_NAME", "ri-0")
+    monkeypatch.setenv("LIFECYCLE_RI_NAMESPACE", "default")
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "kubernetes.default")
+    monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "443")
+    monkeypatch.setenv("LIFECYCLE_SIGNAL_SOURCE", "file")
+    monkeypatch.setenv("LIFECYCLE_SIGNAL_FILE", str(tmp_path / "pod-labels"))
+
+    class FakeRouterAdapter:
+        async def add(self) -> bool:
+            return True
+
+        async def remove(self) -> bool:
+            return True
+
+    class FakeEngineProbe:
+        async def ready(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "patio.application.create_router_adapter", lambda topo_type, worker_info: FakeRouterAdapter()
+    )
+    monkeypatch.setattr(
+        "patio.application.create_engine_probe", lambda topo_type, worker_info: FakeEngineProbe()
+    )
+
+    path = tmp_path / "events.yaml"
+    path.write_text(
+        """
+event_callbacks:
+  hook:
+    - signal: "patio.com/router=offboard"
+      callback: router_offboard
+""",
+        encoding="utf-8",
+    )
+
+    application = PatioApplication(
+        worker_info={"port": 30000},
+        topo_type="sglang",
+        events_config=path,
+    )
+
+    assert isinstance(application.signal_source, FileSignalSource)
+    assert application.signal_source.labels_path == tmp_path / "pod-labels"
+
+
+def test_application_rejects_unknown_signal_source(monkeypatch):
+    monkeypatch.setenv("LIFECYCLE_RI_NAME", "ri-0")
+    monkeypatch.setenv("LIFECYCLE_RI_NAMESPACE", "default")
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "kubernetes.default")
+    monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "443")
+    monkeypatch.setenv("LIFECYCLE_SIGNAL_SOURCE", "queue")
+
+    with pytest.raises(ValueError, match="unsupported LIFECYCLE_SIGNAL_SOURCE"):
+        KubernetesSignalLabelSource  # referenced for linters
+        from patio.application import PatioApplication as _PatioApplication
+        _PatioApplication._default_signal_source(None)

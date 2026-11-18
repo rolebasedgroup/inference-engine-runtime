@@ -16,6 +16,7 @@ from patio.events.loader import load_event_bindings
 from patio.events.registry import callback_plugins, reset_callback_registry
 from patio.events.plugins.sglang import register_sglang_callbacks
 from patio.events.plugins.vllm import register_vllm_callbacks
+from patio.lifecycle.signal_file import FileSignalSource
 from patio.lifecycle.signal_label import KubernetesSignalLabelSource
 from patio.logger import init_logger
 
@@ -109,6 +110,17 @@ class PatioApplication:
 
     def _default_signal_source(self) -> SignalSource:
         if os.getenv("LIFECYCLE_RI_NAME") and os.getenv("KUBERNETES_SERVICE_HOST"):
+            # The signal source selects how signals are read. Clearing always
+            # goes through the Kubernetes API: the downwardAPI file is
+            # read-only, so a file source composes the API source for clear.
+            mode = os.getenv("LIFECYCLE_SIGNAL_SOURCE", "kubernetes")
+            if mode == "file":
+                return FileSignalSource(clear_source=KubernetesSignalLabelSource())
+            if mode != "kubernetes":
+                raise ValueError(
+                    f"unsupported LIFECYCLE_SIGNAL_SOURCE: {mode!r} "
+                    "(supported: kubernetes, file)"
+                )
             return KubernetesSignalLabelSource()
         return MemorySignalSource()
 
