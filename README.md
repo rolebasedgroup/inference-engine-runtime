@@ -112,6 +112,28 @@ event_callbacks:
 `hook` entries are checked in configuration order whenever the matching
 `signal` is present. Patio clears the signal after the callback succeeds.
 
+## Docker Image
+
+Patio is designed to run as a sidecar container next to the inference engine.
+Build the image from the repository root:
+
+```bash
+docker build -t patio-runtime:dev .
+```
+
+The image entrypoint is `patio`, so container arguments are passed to the
+runtime directly:
+
+```bash
+docker run patio-runtime:dev \
+  --events-config /etc/patio/events.yaml \
+  --instance-info '{"topo_type": "sglang", "data": {"port": "30000"}}'
+```
+
+Mount `events.yaml` into the container and pass the required RBG environment
+variables (`RBG_GROUP_NAME`, `ROUTER_ROLE_NAME`, `ROUTER_PORT`, `POD_IP`, and
+`LIFECYCLE_RI_NAME`) when running in Kubernetes.
+
 ## Quick Start
 
 ### Prerequisites
