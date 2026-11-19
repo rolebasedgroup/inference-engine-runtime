@@ -35,10 +35,10 @@ _topo_register_endpoint = os.getenv("TOPO_REGISTER_ENDPOINT")
 HEALTH_CHECK_INTERVAL = os.getenv("HEALTH_CHECK_INTERVAL", 300)
 HEARTBEAT_INTERVAL = os.getenv("HEARTBEAT_INTERVAL", 10)
 
-# RBG Env
-GROUP_NAME = os.getenv("RBG_GROUP_NAME")
-ROLE_NAME = os.getenv("RBG_ROLE_NAME")
-ROLE_INDEX = os.getenv("RBG_ROLE_INDEX")
+# RBG Env (prefer RBG_* prefixed names, fall back to legacy names)
+GROUP_NAME = os.getenv("RBG_GROUP_NAME") or os.getenv("GROUP_NAME")
+ROLE_NAME = os.getenv("RBG_ROLE_NAME") or os.getenv("ROLE_NAME")
+ROLE_INDEX = os.getenv("RBG_ROLE_INDEX") or os.getenv("ROLE_INDEX")
 
 LWS_GROUP_SIZE = os.getenv("LWS_GROUP_SIZE")
 
