@@ -11,6 +11,7 @@ Patio is a lightweight FastAPI server that runs alongside inference engine conta
 - **LoRA Adapter Management** — Dynamically load and unload LoRA adapters at runtime without restarting the engine
 - **Unified Prometheus Metrics** — Scrape, normalize, and re-expose inference engine metrics with a `patio:` prefix
 - **Distributed Topology Management** — Register workers with a central router, heartbeat-based recovery, and graceful shutdown
+- **Event Callbacks** — Configure `start`, `hook`, and `end` operations in `events.yaml` without changing Patio code
 - **Health Check & Readiness** — Standard Kubernetes liveness and readiness probes
 
 ## Architecture
@@ -87,6 +88,77 @@ For vLLM proxy registration, set `TOPO_TYPE` to `vLLM` and point
 `ROUTER_ROLE_NAME` / `ROUTER_PORT` at the proxy service. Patio registers workers
 with the proxy using `/instances/add`.
 
+### Event Callbacks
+
+Patio can run engine-specific operations as named callbacks. Configure the
+event sequence in `events.yaml` and pass the file with `--events-config` or the
+`EVENTS_CONFIG` environment variable:
+
+```yaml
+event_callbacks:
+  start:
+    - engine_wait_ready
+    - router_onboard
+
+  hook:
+    - signal: "patio.com/router=offboard"
+      callback: router_offboard
+
+  end:
+    - router_offboard
+```
+
+`start` and `end` run in configuration order at process startup and shutdown.
+`hook` entries are checked in configuration order whenever the matching
+`signal` is present. Patio clears the signal after the callback succeeds.
+
+#### Reading signals from a downwardAPI file
+
+By default Patio polls the RoleInstance labels through the Kubernetes API.
+When RBG syncs the RoleInstance `signalLabel` values onto the Pod labels,
+Patio can read them from a downwardAPI projection instead:
+
+```yaml
+volumes:
+- name: podinfo
+  downwardAPI:
+    items:
+    - path: pod-labels
+      fieldRef:
+        fieldPath: metadata.labels
+```
+
+Set `LIFECYCLE_SIGNAL_SOURCE=file` to enable this mode. Reading from the
+file removes the per-second API polling; clearing a signal still goes through
+the API, because the downwardAPI file is read-only. After Patio clears the
+signal on the RoleInstance, RBG removes the Pod label and the kubelet
+refreshes the file (typically within a few seconds). Until the file is
+refreshed, Patio may observe the signal again, so hook callbacks must be
+idempotent.
+
+
+## Docker Image
+
+Patio is designed to run as a sidecar container next to the inference engine.
+Build the image from the repository root:
+
+```bash
+docker build -t patio-runtime:dev .
+```
+
+The image entrypoint is `patio`, so container arguments are passed to the
+runtime directly:
+
+```bash
+docker run patio-runtime:dev \
+  --events-config /etc/patio/events.yaml \
+  --instance-info '{"topo_type": "sglang", "data": {"port": "30000"}}'
+```
+
+Mount `events.yaml` into the container and pass the required RBG environment
+variables (`RBG_GROUP_NAME`, `ROUTER_ROLE_NAME`, `ROUTER_PORT`, `POD_IP`, and
+`LIFECYCLE_RI_NAME`) when running in Kubernetes.
+
 ## Quick Start
 
 ### Prerequisites
@@ -132,6 +204,7 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `--log-level` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `--enable-fastapi-docs` | `false` | Enable FastAPI documentation endpoints |
 | `--scrape-engine-metrics` | `true` | Enable scraping of engine metrics |
+| `--events-config` | none | Path to `events.yaml`; enables event callbacks |
 
 ### Environment Variables
 
@@ -150,6 +223,10 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `ROLE_NAME` | RBG role name | `None` |
 | `ROLE_INDEX` | RBG role index | `None` |
 | `HEARTBEAT_INTERVAL` | Topology heartbeat interval (seconds) | `30` |
+| `EVENTS_CONFIG` | Path to the event callback configuration file | `None` |
+| `LIFECYCLE_SIGNAL_SOURCE` | How hook signals are read: `kubernetes` (API polling) or `file` (downwardAPI label file) | `kubernetes` |
+| `LIFECYCLE_SIGNAL_FILE` | Label file path for `LIFECYCLE_SIGNAL_SOURCE=file` | `/etc/patio/pod-labels` |
+| `LIFECYCLE_API_TIMEOUT` | Kubernetes API request timeout for signal reads and clears (seconds) | `10` |
 
 ## Usage with RoleBasedGroup
 
