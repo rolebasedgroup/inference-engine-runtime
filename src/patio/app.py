@@ -72,8 +72,17 @@ def _init_metrics(scrape_metrics: bool):
 
 def stop_topo_client_signal_handler(signal, frame):
     global topo_client
+    # Stop the heartbeat thread before deregistering: an `add` that lands after
+    # the `del` would resurrect the instance, and Motor has no TTL to clean it
+    # up. The event is also checked by MotorTopoClient.register().
+    EXIT_EVENT.set()
     if topo_client is not None:
-        topo_client.unregister()
+        try:
+            topo_client.unregister()
+        except Exception:
+            # Cleanup must never skip the exit: otherwise the pod hangs until
+            # SIGKILL and the deregistration path is never completed.
+            traceback.print_exc()
     sys.exit(0)
 
 
@@ -150,7 +159,8 @@ def main():
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PATIO_PORT, help="Port to listen on"
     )
-    parser.add_argument("--instance-info", type=str, default="", help="instance info")
+    parser.add_argument("--instance-info", type=str, default="",
+                        help='worker instance JSON: {"topo_type": ..., "data": {...}}; see doc/topo.md')
     parser.add_argument(
         "--scrape-engine-metrics",
         type=bool,
