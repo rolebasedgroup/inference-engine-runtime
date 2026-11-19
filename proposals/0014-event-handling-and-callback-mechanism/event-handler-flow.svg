@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 500" role="img" aria-labelledby="event-handler-title event-handler-desc">
+  <title id="event-handler-title">Event Handler 执行流程</title>
+  <desc id="event-handler-desc">程序启动后注册事件函数并执行 start 函数集，随后直接 LIST/WATCH RoleInstance。label 变化时依次检索并执行对应函数，确认后修改 RoleInstance marker；收到终止信号后执行 end 函数集。</desc>
+  <defs>
+    <style>
+      .background { fill: #fbfcfe; }
+      .node { fill: #ffffff; stroke: #9db2d2; stroke-width: 1.5; }
+      .node.start { fill: #e5f6f2; stroke: #58a99c; }
+      .node.watch { fill: #fff5df; stroke: #d6a34d; }
+      .node.end { fill: #fff0f1; stroke: #d58b91; }
+      .node.complete { fill: #e5f6f2; stroke: #58a99c; }
+      .node-name {
+        fill: #172033;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        font-size: 16px;
+        font-weight: 700;
+        text-anchor: middle;
+      }
+      .node-subtitle {
+        fill: #5d6b82;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        font-size: 12px;
+        text-anchor: middle;
+      }
+      .diagram-title {
+        fill: #172033;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        font-size: 23px;
+        font-weight: 750;
+      }
+      .diagram-subtitle, .section-label, .edge-label {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+      .diagram-subtitle { fill: #5d6b82; font-size: 13px; }
+      .section-label { fill: #925507; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; }
+      .edge { fill: none; stroke: #2558d8; stroke-width: 1.8; }
+      .edge.hook { stroke: #d28a22; }
+      .edge.return { stroke: #087f75; }
+      .edge.terminate { stroke: #b33a43; }
+      .edge-label { fill: #43536b; font-size: 11px; text-anchor: middle; }
+      .edge-label.terminate { fill: #b33a43; }
+      .edge-label.return { fill: #087f75; }
+    </style>
+    <marker id="main-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#2558d8"/>
+    </marker>
+    <marker id="hook-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#d28a22"/>
+    </marker>
+    <marker id="return-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#087f75"/>
+    </marker>
+    <marker id="terminate-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#b33a43"/>
+    </marker>
+  </defs>
+
+  <rect class="background" x="1" y="1" width="1398" height="498" rx="18"/>
+
+  <text class="diagram-title" x="40" y="43">Event Handler 执行流程</text>
+  <text class="diagram-subtitle" x="40" y="69">统一进程事件与 RoleInstance lifecycle hook；Hook 直接观察 RoleInstance label</text>
+
+  <!-- 主流程节点 -->
+  <rect class="node" x="30" y="100" width="190" height="88" rx="14"/>
+  <text class="node-name" x="125" y="136">程序启动</text>
+  <text class="node-subtitle" x="125" y="160">加载并校验配置</text>
+
+  <rect class="node" x="260" y="100" width="210" height="88" rx="14"/>
+  <text class="node-name" x="365" y="136">注册事件函数</text>
+  <text class="node-subtitle" x="365" y="160">生成 EventBinding</text>
+
+  <rect class="node start" x="510" y="100" width="200" height="88" rx="14"/>
+  <text class="node-name" x="610" y="136">执行 start fns</text>
+  <text class="node-subtitle" x="610" y="160">按序执行启动函数集</text>
+
+  <rect class="node watch" x="750" y="100" width="270" height="88" rx="14"/>
+  <text class="node-name" x="885" y="132">监听 label 事件、执行 hook</text>
+  <text class="node-subtitle" x="885" y="158">LIST/WATCH RoleInstance</text>
+
+  <rect class="node end" x="1160" y="100" width="210" height="88" rx="14"/>
+  <text class="node-name" x="1265" y="136">执行 end fns</text>
+  <text class="node-subtitle" x="1265" y="160">best-effort 后退出</text>
+
+  <!-- 主流程连线 -->
+  <path class="edge" d="M220 144 H254" marker-end="url(#main-arrow)"/>
+  <path class="edge" d="M470 144 H504" marker-end="url(#main-arrow)"/>
+  <path class="edge" d="M710 144 H744" marker-end="url(#main-arrow)"/>
+  <path class="edge terminate" d="M1020 144 H1154" marker-end="url(#terminate-arrow)"/>
+  <text class="edge-label terminate" x="1087" y="127">SIGTERM / SIGINT</text>
+
+  <!-- Hook 子流程入口 -->
+  <text class="section-label" x="40" y="267">HOOK SUBFLOW</text>
+  <path class="edge hook" d="M885 188 V232 H155 V284" marker-end="url(#hook-arrow)"/>
+  <text class="edge-label" x="520" y="218">marker 变化时进入 Hook 子流程</text>
+
+  <!-- Hook 子流程节点 -->
+  <rect class="node" x="40" y="290" width="230" height="92" rx="14"/>
+  <text class="node-name" x="155" y="327">响应 label 修改</text>
+  <text class="node-subtitle" x="155" y="352">解析最新 RI labels</text>
+
+  <rect class="node" x="340" y="290" width="230" height="92" rx="14"/>
+  <text class="node-name" x="455" y="327">检索对应函数</text>
+  <text class="node-subtitle" x="455" y="352">MarkerIndex → EventBinding</text>
+
+  <rect class="node" x="640" y="290" width="230" height="92" rx="14"/>
+  <text class="node-name" x="755" y="327">执行函数</text>
+  <text class="node-subtitle" x="755" y="352">串行执行 ActionPipeline</text>
+
+  <rect class="node complete" x="940" y="290" width="300" height="92" rx="14"/>
+  <text class="node-name" x="1090" y="327">修改 label</text>
+  <text class="node-subtitle" x="1090" y="352">GET 确认后 PATCH 自己的 marker</text>
+
+  <!-- Hook 子流程连线 -->
+  <path class="edge hook" d="M270 336 H334" marker-end="url(#hook-arrow)"/>
+  <path class="edge hook" d="M570 336 H634" marker-end="url(#hook-arrow)"/>
+  <path class="edge hook" d="M870 336 H934" marker-end="url(#hook-arrow)"/>
+
+  <!-- 返回监听循环 -->
+  <path class="edge return" d="M1090 290 V240 H970 V194" marker-end="url(#return-arrow)"/>
+  <text class="edge-label return" x="1030" y="264">完成后继续监听</text>
+</svg>

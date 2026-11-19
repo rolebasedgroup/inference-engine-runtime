@@ -1,0 +1,35 @@
+title: Patio Event Handling and Callback Mechanism
+proposal-number: "0014"
+authors:
+  - diw-zw
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# draft | review | accepted | implemented | rejected | withdrawn | superseded | deferred
+status: draft
+
+creation-date: 2026-11-06
+last-updated: 2026-11-17
+
+# The first Patio version expected to contain this behavior, if accepted.
+target-version: TBD
+
+# Component(s) primarily affected by this change.
+areas:
+  - application
+  - events
+  - adapters
+  - lifecycle
+  - engine
+  - metrics
+  - topo
+  - deployment
+  - documentation
+
+# Related issues and pull requests.
+issues:
+  - https://github.com/rolebasedgroup/inference-engine-runtime/pull/10
+see-also:
+  - https://github.com/sgl-project/rbg/pull/546
