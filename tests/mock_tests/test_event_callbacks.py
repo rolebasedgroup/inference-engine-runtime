@@ -1,6 +1,7 @@
 """Tests for event callback configuration and execution."""
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -252,6 +253,44 @@ async def test_event_executor_runs_matching_hook_and_clears_signal():
     assert calls == ["offboard"]
     assert await source.signals() == set()
     assert await executor.run_once() == 0
+
+
+@pytest.mark.asyncio
+async def test_event_executor_logs_hook_lifecycle(caplog):
+    source = MemorySignalSource({"patio.com/router=offboard"})
+
+    async def router_offboard() -> None:
+        pass
+
+    executor = EventExecutor(
+        start_callbacks=(),
+        end_callbacks=(),
+        hook_bindings=(("patio.com/router=offboard", router_offboard),),
+        signal_source=source,
+    )
+
+    with caplog.at_level(logging.INFO, logger="patio.events.executor"):
+        assert await executor.run_once() == 1
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        message == "hook signals detected: signals=patio.com/router=offboard"
+        for message in messages
+    )
+    assert any(
+        message == "hook callback started: signal=patio.com/router=offboard callback=router_offboard"
+        for message in messages
+    )
+    assert any(
+        message == "hook signal cleared: signal=patio.com/router=offboard"
+        for message in messages
+    )
+    assert any(
+        message.startswith(
+            "hook callback completed: signal=patio.com/router=offboard callback=router_offboard duration="
+        )
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio

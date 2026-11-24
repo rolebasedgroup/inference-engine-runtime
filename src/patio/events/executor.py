@@ -125,19 +125,36 @@ class EventExecutor:
         if not signals:
             return 0
 
+        self.logger.info(
+            "hook signals detected: signals=%s",
+            ",".join(sorted(signals)),
+            extra={"signals": sorted(signals), "signal_count": len(signals)},
+        )
+
+        matched = False
         for signal, callback in self.hook_bindings:
             if signal not in signals:
                 continue
 
+            matched = True
+            callback_name = getattr(callback, "__name__", repr(callback))
             started = time.perf_counter()
+            self.logger.info(
+                "hook callback started: signal=%s callback=%s",
+                signal,
+                callback_name,
+                extra={"signal": signal, "callback": callback_name},
+            )
             try:
                 await callback()
             except Exception:
                 self.logger.exception(
-                    "hook callback failed",
+                    "hook callback failed: signal=%s callback=%s",
+                    signal,
+                    callback_name,
                     extra={
                         "signal": signal,
-                        "callback": getattr(callback, "__name__", repr(callback)),
+                        "callback": callback_name,
                         "duration": time.perf_counter() - started,
                     },
                 )
@@ -150,23 +167,33 @@ class EventExecutor:
                 current_signals = await self.signal_source.signals()
                 if signal in current_signals:
                     await self.signal_source.clear(signal)
+                    self.logger.info(
+                        "hook signal cleared: signal=%s",
+                        signal,
+                        extra={"signal": signal},
+                    )
                 else:
                     self.logger.warning(
-                        "signal changed while callback ran, skipping clear",
+                        "signal changed while callback ran, skipping clear: signal=%s",
+                        signal,
                         extra={"signal": signal},
                     )
             except Exception:
                 self.logger.exception(
-                    "failed to clear signal",
+                    "failed to clear signal: signal=%s",
+                    signal,
                     extra={"signal": signal},
                 )
                 return 0
 
-            self.logger.debug(
-                "hook callback completed",
+            self.logger.info(
+                "hook callback completed: signal=%s callback=%s duration=%.3f",
+                signal,
+                callback_name,
+                time.perf_counter() - started,
                 extra={
                     "signal": signal,
-                    "callback": getattr(callback, "__name__", repr(callback)),
+                    "callback": callback_name,
                     "duration": time.perf_counter() - started,
                 },
             )
@@ -175,11 +202,18 @@ class EventExecutor:
                     await self.on_hook_processed(signal)
                 except Exception:
                     self.logger.exception(
-                        "hook processed notification failed",
+                        "hook processed notification failed: signal=%s",
+                        signal,
                         extra={"signal": signal},
                     )
             return 1
 
+        if not matched:
+            self.logger.warning(
+                "hook signals detected but no callback binding matched: signals=%s",
+                ",".join(sorted(signals)),
+                extra={"signals": sorted(signals)},
+            )
         return 0
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
