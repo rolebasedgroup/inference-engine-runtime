@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from patio.events.executor import EventExecutor, MemorySignalSource
 from patio.events.loader import load_event_bindings
@@ -404,6 +405,24 @@ async def test_sglang_router_remove_is_noop_when_not_registered(monkeypatch):
         assert await adapter.remove() is True
 
     get.assert_called_once()
+    delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sglang_router_remove_treats_deleted_router_dns_as_success(monkeypatch):
+    _configure_sglang_router_env(monkeypatch)
+    adapter = SGLangRouterAdapter({"port": "30000"})
+    error = requests.exceptions.ConnectionError(
+        "HTTPConnectionPool(host='missing', port=8000): "
+        "Name does not resolve"
+    )
+
+    with (
+        patch("patio.adapters.router.sglang.requests.get", side_effect=error),
+        patch("patio.adapters.router.sglang.requests.delete") as delete,
+    ):
+        assert await adapter.remove() is True
+
     delete.assert_not_called()
 
 

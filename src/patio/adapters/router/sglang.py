@@ -96,7 +96,15 @@ class SGLangRouterAdapter(RouterAdapter):
             # Do not rely on the registration performed by this process: the
             # events.yaml may omit start callbacks, or the process may have
             # restarted since onboarding. Ask the router for the current id.
-            worker_id = self._lookup_worker_id_sync()
+            try:
+                worker_id = self._lookup_worker_id_sync()
+            except requests.exceptions.ConnectionError as exc:
+                # Deleting an RBG can remove the router before the engine's
+                # preDelete hook runs. If the router DNS name is already gone,
+                # there is no router membership left to remove.
+                if "Name does not resolve" in str(exc) or "Failed to resolve" in str(exc):
+                    return True
+                raise
             if worker_id is None:
                 # This worker URL is not registered; offboard is complete.
                 return True
