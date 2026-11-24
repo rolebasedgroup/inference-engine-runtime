@@ -122,21 +122,27 @@ class EventExecutor:
         """Run at most one matching hook callback and clear its signal."""
 
         signals = await self.signal_source.signals()
-        if not signals:
+        matching_signals = {
+            signal
+            for signal, _ in self.hook_bindings
+            if signal in signals
+        }
+        if not matching_signals:
             return 0
 
         self.logger.info(
             "hook signals detected: signals=%s",
-            ",".join(sorted(signals)),
-            extra={"signals": sorted(signals), "signal_count": len(signals)},
+            ",".join(sorted(matching_signals)),
+            extra={
+                "signals": sorted(matching_signals),
+                "signal_count": len(matching_signals),
+            },
         )
 
-        matched = False
         for signal, callback in self.hook_bindings:
             if signal not in signals:
                 continue
 
-            matched = True
             callback_name = getattr(callback, "__name__", repr(callback))
             started = time.perf_counter()
             self.logger.info(
@@ -208,12 +214,6 @@ class EventExecutor:
                     )
             return 1
 
-        if not matched:
-            self.logger.warning(
-                "hook signals detected but no callback binding matched: signals=%s",
-                ",".join(sorted(signals)),
-                extra={"signals": sorted(signals)},
-            )
         return 0
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
