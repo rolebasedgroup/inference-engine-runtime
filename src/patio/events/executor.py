@@ -52,6 +52,7 @@ class EventExecutor:
         poll_interval: float = 1.0,
         retry_times: int = 60,
         retry_interval: float = 3.0,
+        signal_interval: float = 1.0,
         on_hook_processed: Callable[[str], Awaitable[None]] | None = None,
         logger=None,
     ):
@@ -65,6 +66,13 @@ class EventExecutor:
         # semantics of the legacy topology client for transient failures.
         self.retry_times = max(1, int(retry_times))
         self.retry_interval = float(retry_interval)
+        # The downwardAPI label file lags behind RoleInstance label removal
+        # by a few seconds, so a cleared signal can be re-detected right
+        # after its callback ran. Enforce a minimum interval between
+        # executions of the same signal instead of relying on callback
+        # idempotency alone.
+        self.signal_interval = max(0.0, float(signal_interval))
+        self._last_signal_run: dict[str, float] = {}
         self.on_hook_processed = on_hook_processed
         self.logger = logger or init_logger(__name__)
 
@@ -118,15 +126,31 @@ class EventExecutor:
 
         await self._run_callbacks(self.end_callbacks, "end")
 
+    def _signal_ready(self, signal: str, now: float) -> bool:
+        last = self._last_signal_run.get(signal)
+        return last is None or now - last >= self.signal_interval
+
     async def run_once(self) -> int:
         """Run at most one matching hook callback and clear its signal."""
 
         signals = await self.signal_source.signals()
-        matching_signals = {
-            signal
-            for signal, _ in self.hook_bindings
-            if signal in signals
+        now = time.perf_counter()
+        present_signals = {
+            signal for signal, _ in self.hook_bindings if signal in signals
         }
+        matching_signals = {
+            signal for signal in present_signals if self._signal_ready(signal, now)
+        }
+        suppressed = present_signals - matching_signals
+        if suppressed:
+            self.logger.debug(
+                "hook signals suppressed by execution interval: signals=%s",
+                ",".join(sorted(suppressed)),
+                extra={
+                    "signals": sorted(suppressed),
+                    "signal_interval": self.signal_interval,
+                },
+            )
         if not matching_signals:
             return 0
 
@@ -140,11 +164,12 @@ class EventExecutor:
         )
 
         for signal, callback in self.hook_bindings:
-            if signal not in signals:
+            if signal not in matching_signals:
                 continue
 
             callback_name = getattr(callback, "__name__", repr(callback))
             started = time.perf_counter()
+            self._last_signal_run[signal] = started
             self.logger.info(
                 "hook callback started: signal=%s callback=%s",
                 signal,

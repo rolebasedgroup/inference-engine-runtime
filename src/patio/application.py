@@ -34,6 +34,7 @@ class PatioApplication:
         heartbeat_interval: float | None = None,
         retry_times: int | None = None,
         retry_interval: float | None = None,
+        signal_interval: float | None = None,
     ):
         self.worker_info = worker_info
         self.topo_type = topo_type
@@ -59,6 +60,11 @@ class PatioApplication:
             retry_interval
             if retry_interval is not None
             else float(os.getenv("EVENT_CALLBACK_RETRY_INTERVAL", "3"))
+        )
+        self.signal_interval = (
+            signal_interval
+            if signal_interval is not None
+            else float(os.getenv("EVENT_SIGNAL_INTERVAL", "1"))
         )
 
         self._stop_event = asyncio.Event()
@@ -105,6 +111,7 @@ class PatioApplication:
             poll_interval=self.poll_interval,
             retry_times=self.retry_times,
             retry_interval=self.retry_interval,
+            signal_interval=self.signal_interval,
             on_hook_processed=self._on_hook_processed,
         )
 

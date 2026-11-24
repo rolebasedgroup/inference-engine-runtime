@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -775,6 +776,154 @@ async def test_event_executor_notifies_hook_processed():
 
     assert await executor.run_once() == 1
     assert notified == ["patio.com/router=offboard"]
+
+
+@pytest.mark.asyncio
+async def test_event_executor_suppresses_same_signal_within_interval():
+    class StaleFileSource:
+        """Simulates a downwardAPI file that keeps showing a cleared signal."""
+
+        def __init__(self) -> None:
+            self.clears: list[str] = []
+
+        async def signals(self) -> set[str]:
+            return {"patio.com/router=offboard"}
+
+        async def clear(self, signal: str) -> None:
+            self.clears.append(signal)
+
+    source = StaleFileSource()
+    calls: list[str] = []
+
+    async def callback() -> None:
+        calls.append("offboard")
+
+    executor = EventExecutor(
+        start_callbacks=(),
+        end_callbacks=(),
+        hook_bindings=(("patio.com/router=offboard", callback),),
+        signal_source=source,
+        signal_interval=1.0,
+    )
+
+    assert await executor.run_once() == 1
+    assert calls == ["offboard"]
+    # The stale file re-presents the same signal immediately: no second
+    # execution and no duplicate clear within the interval.
+    assert await executor.run_once() == 0
+    assert calls == ["offboard"]
+    assert source.clears == ["patio.com/router=offboard"]
+
+
+@pytest.mark.asyncio
+async def test_event_executor_reruns_signal_after_interval(monkeypatch):
+    clock = {"now": 100.0}
+    monkeypatch.setattr(
+        "patio.events.executor.time",
+        SimpleNamespace(perf_counter=lambda: clock["now"]),
+    )
+    source = MemorySignalSource()
+    calls: list[str] = []
+
+    async def callback() -> None:
+        calls.append("offboard")
+
+    executor = EventExecutor(
+        start_callbacks=(),
+        end_callbacks=(),
+        hook_bindings=(("patio.com/router=offboard", callback),),
+        signal_source=source,
+        signal_interval=1.0,
+    )
+
+    await source.add("patio.com/router=offboard")
+    assert await executor.run_once() == 1
+    # Still within the interval: the re-added signal is suppressed.
+    clock["now"] += 0.5
+    await source.add("patio.com/router=offboard")
+    assert await executor.run_once() == 0
+    # Interval elapsed: the signal may run again.
+    clock["now"] += 0.6
+    assert await executor.run_once() == 1
+    assert calls == ["offboard", "offboard"]
+
+
+@pytest.mark.asyncio
+async def test_event_executor_interval_is_per_signal():
+    class StaleFileSource:
+        async def signals(self) -> set[str]:
+            return {"patio.com/router=offboard", "patio.com/ready=onboard"}
+
+        async def clear(self, signal: str) -> None:
+            pass
+
+    calls: list[str] = []
+
+    async def offboard() -> None:
+        calls.append("offboard")
+
+    async def onboard() -> None:
+        calls.append("onboard")
+
+    executor = EventExecutor(
+        start_callbacks=(),
+        end_callbacks=(),
+        hook_bindings=(
+            ("patio.com/router=offboard", offboard),
+            ("patio.com/ready=onboard", onboard),
+        ),
+        signal_source=StaleFileSource(),
+        signal_interval=1.0,
+    )
+
+    assert await executor.run_once() == 1
+    assert calls == ["offboard"]
+    # The offboard cooldown must not block a different signal.
+    assert await executor.run_once() == 1
+    assert calls == ["offboard", "onboard"]
+    assert await executor.run_once() == 0
+
+
+def test_application_reads_signal_interval_from_env(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("EVENT_SIGNAL_INTERVAL", "2.5")
+
+    class FakeRouterAdapter:
+        async def add(self) -> bool:
+            return True
+
+        async def remove(self) -> bool:
+            return True
+
+    class FakeEngineProbe:
+        async def ready(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "patio.application.create_router_adapter", lambda topo_type, worker_info: FakeRouterAdapter()
+    )
+    monkeypatch.setattr(
+        "patio.application.create_engine_probe", lambda topo_type, worker_info: FakeEngineProbe()
+    )
+
+    path = tmp_path / "events.yaml"
+    path.write_text(
+        """
+event_callbacks:
+  hook:
+    - signal: "patio.com/router=offboard"
+      callback: router_offboard
+""",
+        encoding="utf-8",
+    )
+
+    application = PatioApplication(
+        worker_info={"port": 30000},
+        topo_type="sglang",
+        events_config=path,
+    )
+
+    assert application.signal_interval == 2.5
+    assert application.executor.signal_interval == 2.5
 
 
 def test_parse_downward_labels():

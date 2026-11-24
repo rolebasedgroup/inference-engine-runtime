@@ -227,6 +227,7 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `LIFECYCLE_SIGNAL_SOURCE` | How hook signals are read: `kubernetes` (API polling) or `file` (downwardAPI label file) | `kubernetes` |
 | `LIFECYCLE_SIGNAL_FILE` | Label file path for `LIFECYCLE_SIGNAL_SOURCE=file` | `/etc/patio/pod-labels` |
 | `LIFECYCLE_API_TIMEOUT` | Kubernetes API request timeout for signal reads and clears (seconds) | `10` |
+| `EVENT_SIGNAL_INTERVAL` | Minimum interval between executions of the same hook signal (seconds); suppresses re-detection from a stale downwardAPI label file | `1` |
 
 ## Usage with RoleBasedGroup
 
