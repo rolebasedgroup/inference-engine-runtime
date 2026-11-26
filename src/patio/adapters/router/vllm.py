@@ -12,7 +12,6 @@ from patio import envs
 from patio.adapters.router.base import (
     MembershipState,
     RouterAdapter,
-    is_dns_resolution_failure,
 )
 
 
@@ -93,28 +92,9 @@ class VLLMRouterAdapter(RouterAdapter):
         return await asyncio.to_thread(register)
 
     async def remove(self) -> bool:
-        def unregister() -> bool:
-            try:
-                response = requests.post(
-                    f"http://{self.proxy_endpoint}/instances/remove",
-                    json=self._payload(),
-                    timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
-                )
-            except requests.exceptions.ConnectionError as exc:
-                # Deleting an RBG can remove the router before the engine's
-                # preDelete hook runs. If the router DNS name is already gone,
-                # there is no router membership left to remove.
-                if is_dns_resolution_failure(exc):
-                    return True
-                raise
-            # The official vLLM core demo does not expose a remove route. A
-            # 404 therefore means there is no router membership API to call,
-            # not that this worker is still registered.
-            if response.status_code == 404:
-                return True
-            return self._request_succeeded(response)
-
-        return await asyncio.to_thread(unregister)
+        # vLLM's proxy examples do not expose a stable removal API. Preserve
+        # the legacy no-op behavior until a supported contract exists.
+        return True
 
     async def query(self) -> MembershipState:
         # The vLLM proxy does not currently expose a query API.

@@ -88,8 +88,8 @@ For vLLM proxy registration, set `TOPO_TYPE` to `vLLM` and point
 `ROUTER_ROLE_NAME` / `ROUTER_PORT` at the proxy service. Patio registers workers
 with the proxy using `/instances/add`. Current vLLM proxy implementations use
 different payload fields for this route, so Patio sends both `instance` and
-`instances`; during offboarding, a 404 from `/instances/remove` is treated as a
-no-op for proxies that do not expose that route.
+`instances`. vLLM's proxy examples do not expose a stable removal API, so
+offboarding is a no-op.
 
 ### Event Callbacks
 

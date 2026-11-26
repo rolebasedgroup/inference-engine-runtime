@@ -48,6 +48,8 @@ engine-specific code path.
 - No new public HTTP API on the Patio server.
 - No engine API changes; only existing SGLang/vLLM router and health endpoints
   are used.
+- No vLLM removal API; offboard remains a no-op until vLLM defines a stable
+  membership contract.
 - No support for engines other than SGLang and vLLM in the first version.
 - No generic workflow engine, DAG execution, or user-defined script hooks.
 
@@ -224,16 +226,6 @@ failing hooks.
 
 ## Open Questions
 
-<<[UNRESOLVED vLLM maintainers]>>
-Confirm which vLLM proxy implementation is the supported integration target and
-whether its membership API is stable. The official vLLM disaggregated proxy demo
-exposes only `/instances/add` with a singular `instance` field; the vLLM Ascend
-load-balance proxy exposes both `/instances/add` and `/instances/remove` with a
-plural `instances` field, and their authentication requirements differ. Until
-the contract is standardized, Patio sends both fields and treats HTTP 404 from
-removal as a no-op because the official demo has no remove route.
-<<[/UNRESOLVED]>>
-
 <<[UNRESOLVED RBG maintainers]>>
 Should an onboard signal resume heartbeat recovery, or should only process
 restart re-enable registration after an explicit offboard?
@@ -244,8 +236,8 @@ restart re-enable registration after an explicit offboard?
 - 2026-11-18: Initial event callback implementation.
 - 2026-11-24: File signal source and signal execution cooldown.
 - 2026-11-26: Review fixes for atomic clears, membership races, retry budgets,
-  TLS verification, the vLLM proxy payload compatibility fields, and this
-  proposal.
+  TLS verification, the vLLM proxy payload compatibility fields, vLLM offboard
+  no-op behavior, and this proposal.
 
 ## References
 

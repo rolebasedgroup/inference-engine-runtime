@@ -504,66 +504,14 @@ async def test_vllm_router_add_sends_both_payload_fields(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_vllm_router_remove_sends_both_payload_fields(monkeypatch):
+async def test_vllm_router_remove_is_noop(monkeypatch):
     _configure_vllm_router_env(monkeypatch)
     adapter = VLLMRouterAdapter({"type": "prefill", "instance": "1.2.3.4:8000"})
 
-    with patch(
-        "patio.adapters.router.vllm.requests.post",
-        return_value=_get_response({"message": "removed"}),
-    ) as post:
+    with patch("patio.adapters.router.vllm.requests.post") as post:
         assert await adapter.remove() is True
 
-    assert post.call_args.args[0].endswith("/instances/remove")
-    assert post.call_args.kwargs["json"] == {
-        "type": "prefill",
-        "instance": "1.2.3.4:8000",
-        "instances": ["1.2.3.4:8000"],
-    }
-
-
-@pytest.mark.asyncio
-async def test_vllm_router_remove_treats_missing_route_as_noop(monkeypatch):
-    _configure_vllm_router_env(monkeypatch)
-    adapter = VLLMRouterAdapter({"type": "prefill", "instance": "1.2.3.4:8000"})
-
-    with patch(
-        "patio.adapters.router.vllm.requests.post",
-        return_value=_get_response({"detail": "not found"}, status_code=404),
-    ):
-        assert await adapter.remove() is True
-
-
-@pytest.mark.asyncio
-async def test_vllm_router_remove_reports_error_payload(monkeypatch):
-    _configure_vllm_router_env(monkeypatch)
-    adapter = VLLMRouterAdapter({"type": "prefill", "instance": "1.2.3.4:8000"})
-
-    with patch(
-        "patio.adapters.router.vllm.requests.post",
-        return_value=_get_response({"error": "invalid instance type"}),
-    ):
-        assert await adapter.remove() is False
-
-
-@pytest.mark.asyncio
-async def test_vllm_router_remove_treats_deleted_router_dns_as_success(monkeypatch):
-    _configure_vllm_router_env(monkeypatch)
-    adapter = VLLMRouterAdapter({"type": "prefill", "instance": "1.2.3.4:8000"})
-    dns_error = socket.gaierror(-2, "Name does not resolve")
-    urllib_error = requests.exceptions.ConnectionError(
-        "HTTPConnectionPool(host='missing', port=8000)"
-    )
-    urllib_error.__cause__ = dns_error
-    error = requests.exceptions.ConnectionError(urllib_error)
-    error.__cause__ = urllib_error
-
-    with (
-        patch("patio.adapters.router.vllm.requests.post", side_effect=error) as post,
-    ):
-        assert await adapter.remove() is True
-
-    post.assert_called_once()
+    post.assert_not_called()
 
 
 @pytest.mark.asyncio
