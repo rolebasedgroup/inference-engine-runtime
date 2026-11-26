@@ -44,6 +44,7 @@ EVENT_CALLBACK_RETRY_INTERVAL = "3"
 # 60 x 3s retry loop is too long for the default 30s grace period.
 EVENT_END_CALLBACK_RETRY_TIMES = "5"
 EVENT_END_CALLBACK_RETRY_INTERVAL = "1"
+EVENT_END_CALLBACK_TIMEOUT = "20"
 # The downwardAPI label file can lag label removal by tens of seconds.
 EVENT_SIGNAL_INTERVAL = "60"
 
@@ -73,6 +74,12 @@ def get_event_end_callback_retry_interval() -> float:
         os.getenv(
             "EVENT_END_CALLBACK_RETRY_INTERVAL", EVENT_END_CALLBACK_RETRY_INTERVAL
         )
+    )
+
+
+def get_event_end_callback_timeout() -> float:
+    return float(
+        os.getenv("EVENT_END_CALLBACK_TIMEOUT", EVENT_END_CALLBACK_TIMEOUT)
     )
 
 

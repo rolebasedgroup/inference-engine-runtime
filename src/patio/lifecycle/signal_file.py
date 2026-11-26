@@ -32,12 +32,14 @@ class FileSignalSource:
         self,
         labels_path: str | Path | None = None,
         clear_source: KubernetesSignalLabelSource | None = None,
+        expected_signals: set[str] | None = None,
     ):
         self.labels_path = Path(
             labels_path or os.getenv("LIFECYCLE_SIGNAL_FILE", "/etc/patio/pod-labels")
         )
         # The clear path needs the RoleInstance name and in-cluster API access.
         self._clear_source = clear_source or KubernetesSignalLabelSource()
+        self._expected_signals = expected_signals
 
     async def signals(self) -> set[str]:
         """Return the labels currently projected into the file.
@@ -50,7 +52,18 @@ class FileSignalSource:
             content = self.labels_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return set()
-        return parse_downward_labels(content)
+        signals = parse_downward_labels(content)
+        if self._expected_signals is not None:
+            signals &= self._expected_signals
+        if not signals:
+            return set()
+
+        # The downwardAPI file is a non-authoritative mirror of Pod labels.
+        # Before any callback side effect runs, validate the candidate signals
+        # against the RoleInstance labels.  This keeps file mode from turning a
+        # forged Pod label into an offboard/onboard command.
+        authoritative = await self._clear_source.signals()
+        return signals & authoritative
 
     async def clear(self, signal: str) -> None:
         """Clear the signal on the RoleInstance through the Kubernetes API."""

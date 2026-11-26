@@ -107,10 +107,13 @@ RBG Controller     RoleInstance/Pod labels       Patio Sidecar
 
 - `kubernetes`: poll RoleInstance labels through the API.
 - `file`: read labels from a downwardAPI projection; clearing still goes
-  through the API.
+  through the API. Before executing a hook, the file source validates the
+  candidate signal against the authoritative RoleInstance label.
 - An explicitly configured source is validated at startup. Without an explicit
   configuration and outside a cluster, Patio falls back to an empty in-memory
   source and warns when hooks are configured.
+- When no hook callbacks are configured, the signal polling task is not
+  started.
 
 Signal clearing is a JSON Patch `test` followed by `remove`, with JSON Pointer
 escaping for label keys. A 422 response means the value changed and no label is
@@ -140,11 +143,16 @@ removal. Kubernetes API TLS verification fails closed unless
 | `LIFECYCLE_API_TIMEOUT` | `10` | Kubernetes request timeout |
 | `LIFECYCLE_API_INSECURE` | `false` | Explicit TLS opt-out |
 | `EVENT_POLL_INTERVAL` | `1` | Delay between idle polls |
-| `EVENT_CALLBACK_RETRY_TIMES` | `60` | Start/hook attempts |
-| `EVENT_CALLBACK_RETRY_INTERVAL` | `3` | Start/hook retry delay |
+| `EVENT_CALLBACK_RETRY_TIMES` | `60` | Start/end attempts |
+| `EVENT_CALLBACK_RETRY_INTERVAL` | `3` | Start/end retry delay |
 | `EVENT_END_CALLBACK_RETRY_TIMES` | `5` | End attempts |
 | `EVENT_END_CALLBACK_RETRY_INTERVAL` | `1` | End retry delay |
+| `EVENT_END_CALLBACK_TIMEOUT` | `20` | Total end wall-clock budget |
 | `EVENT_SIGNAL_INTERVAL` | `60` | Same-signal execution cooldown |
+
+Hook callbacks are retried by the signal polling loop; `EVENT_CALLBACK_RETRY_*`
+applies to start and end callbacks, while `EVENT_SIGNAL_INTERVAL` controls the
+same-signal cooldown for hooks.
 
 ### Compatibility
 
@@ -152,7 +160,8 @@ Deployments that do not pass `--events-config` keep the legacy topology client
 path and its heartbeat. The event path preserves the legacy heartbeat contract
 when `router_onboard` is configured as a start callback. Existing environment
 variables remain unchanged. Rollback is removing `--events-config` from the
-container command.
+container command, or clearing `EVENTS_CONFIG` when the event path was enabled
+through the environment variable.
 
 ### Observability
 
@@ -174,7 +183,8 @@ as non-root UID 1000 with a narrowed build context.
 | Stale downwardAPI file causes duplicate hook execution | Duplicate offboard requests | Hook logs | Execution cooldown plus idempotent callbacks |
 | Controller updates signal during callback | New command discarded | JSON Patch 422 warning | Conditional `test`/`remove` patch |
 | Heartbeat races offboard | Removed worker re-registered | Membership logs | Shared membership lock and pre-callback suspension |
-| End callbacks exceed grace period | SIGKILL before cleanup | Shutdown logs | Separate short end retry budget |
+| End callbacks exceed grace period | SIGKILL before cleanup | Shutdown logs | Separate short end retry budget and total end timeout |
+| Forged Pod label triggers a hook | Unauthorized offboard/onboard | Signal validation logs | File signals are validated against RoleInstance before callback execution |
 
 ### Drawbacks
 
@@ -199,7 +209,10 @@ compatible with the legacy client until that client is retired.
 resolution, ordering, retries, end retry budget, hook starvation, changed-signal
 clearing, heartbeat suspend/resume, membership serialization, both signal
 sources, DNS failure handling, vLLM single-shot readiness, and the vLLM proxy
-payload compatibility fields.
+payload compatibility fields. It also covers startup cleanup after a partial
+start failure, the end wall-clock timeout, no-hook polling suppression, file
+signal authority validation, and vLLM engine-only configuration without router
+environment variables.
 
 ### Integration tests
 
@@ -238,6 +251,8 @@ restart re-enable registration after an explicit offboard?
 - 2026-11-26: Review fixes for atomic clears, membership races, retry budgets,
   TLS verification, the vLLM proxy payload compatibility fields, vLLM offboard
   no-op behavior, and this proposal.
+- 2026-11-26: Bounded shutdown, startup cleanup, file signal authority
+  validation, and polling scope fixes.
 
 ## References
 

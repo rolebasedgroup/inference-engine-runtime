@@ -28,7 +28,7 @@ class RouterAdapter(ABC):
 
     @abstractmethod
     async def query(self) -> MembershipState:
-        """Return the router's current membership state."""
+        """Return a best-effort membership state for this worker."""
 
 
 def is_dns_resolution_failure(exc: BaseException) -> bool:

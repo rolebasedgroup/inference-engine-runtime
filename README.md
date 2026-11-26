@@ -114,6 +114,8 @@ event_callbacks:
 `start` and `end` run in configuration order at process startup and shutdown.
 `hook` entries are checked in configuration order whenever the matching
 `signal` is present. Patio clears the signal after the callback succeeds.
+When no `hook` entries are configured, Patio does not start the signal polling
+task.
 
 #### Reading signals from a downwardAPI file
 
@@ -139,6 +141,10 @@ refreshes the file. The refresh depends on the kubelet sync period and label
 cache and can take tens of seconds (in some clusters up to about a minute).
 Patio suppresses repeat execution of the same signal value for
 `EVENT_SIGNAL_INTERVAL` seconds and hook callbacks must remain idempotent.
+
+Before a hook callback runs, Patio validates the signal from the downwardAPI
+file against the authoritative RoleInstance label. This prevents a forged Pod
+label from triggering an offboard or onboard action.
 
 Signal clearing is atomic on the API server: Patio sends a JSON Patch with a
 `test` of the processed signal value followed by `remove`. If the controller
@@ -254,11 +260,16 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `LIFECYCLE_API_TIMEOUT` | Kubernetes API request timeout for signal reads and clears (seconds) | `10` |
 | `LIFECYCLE_API_INSECURE` | Skip Kubernetes API TLS verification; required explicitly for insecure test deployments | `false` |
 | `EVENT_POLL_INTERVAL` | Delay between signal-polling iterations when no hook was processed (seconds) | `1` |
-| `EVENT_CALLBACK_RETRY_TIMES` | Maximum attempts for start callbacks and hook callback execution | `60` |
-| `EVENT_CALLBACK_RETRY_INTERVAL` | Delay between start and hook callback retries (seconds) | `3` |
+| `EVENT_CALLBACK_RETRY_TIMES` | Maximum attempts for start and end callbacks | `60` |
+| `EVENT_CALLBACK_RETRY_INTERVAL` | Delay between start and end callback retries (seconds) | `3` |
 | `EVENT_END_CALLBACK_RETRY_TIMES` | Maximum attempts for end callbacks; must fit `terminationGracePeriodSeconds` | `5` |
 | `EVENT_END_CALLBACK_RETRY_INTERVAL` | Delay between end callback retries (seconds) | `1` |
+| `EVENT_END_CALLBACK_TIMEOUT` | Total wall-clock budget for all end callbacks (seconds) | `20` |
 | `EVENT_SIGNAL_INTERVAL` | Minimum interval between executions of the same hook signal (seconds); suppresses re-detection from a stale downwardAPI label file | `60` |
+
+Hook callbacks are retried by the signal polling loop. The same signal value is
+suppressed until `EVENT_SIGNAL_INTERVAL` elapses; `EVENT_CALLBACK_RETRY_*`
+does not limit hook retries.
 
 ## Usage with RoleBasedGroup
 

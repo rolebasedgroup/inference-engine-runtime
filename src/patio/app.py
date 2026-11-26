@@ -160,8 +160,8 @@ def _configure_event_application(
 
     @asynccontextmanager
     async def event_application_lifespan(_app: FastAPI):
-        await application.start()
         try:
+            await application.start()
             yield
         finally:
             await application.stop()
@@ -232,7 +232,13 @@ def main():
 
     # Run the server
     try:
-        uvicorn.run(app=app, host=args.host, port=args.port, reload=False)
+        uvicorn.run(
+            app=app,
+            host=args.host,
+            port=args.port,
+            reload=False,
+            timeout_graceful_shutdown=10,
+        )
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:

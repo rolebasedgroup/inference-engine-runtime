@@ -11,14 +11,12 @@ from prometheus_client.parser import text_string_to_metric_families
 
 from patio import envs
 from patio.adapters.engine.base import EngineProbe
-from patio.topo.client.vllm_topo_client import VLLMProxyTopoClient
 
 
 class VLLMEngineProbe(EngineProbe):
     """Single-shot vLLM engine readiness and quiescence checks."""
 
-    def __init__(self, client: VLLMProxyTopoClient, worker_info: dict):
-        self.client = client
+    def __init__(self, worker_info: dict):
         self.worker_info = worker_info
 
     async def ready(self) -> bool:

@@ -38,6 +38,7 @@ class PatioApplication:
         signal_interval: float | None = None,
         end_retry_times: int | None = None,
         end_retry_interval: float | None = None,
+        end_timeout: float | None = None,
     ):
         self.worker_info = worker_info
         self.topo_type = topo_type
@@ -77,6 +78,11 @@ class PatioApplication:
             end_retry_interval
             if end_retry_interval is not None
             else envs.get_event_end_callback_retry_interval()
+        )
+        self.end_timeout = (
+            end_timeout
+            if end_timeout is not None
+            else envs.get_event_end_callback_timeout()
         )
 
         self._stop_event = asyncio.Event()
@@ -149,6 +155,7 @@ class PatioApplication:
             signal_interval=self.signal_interval,
             end_retry_times=self.end_retry_times,
             end_retry_interval=self.end_retry_interval,
+            end_timeout=self.end_timeout,
             on_hook_processed=self._on_hook_processed,
         )
 
@@ -158,9 +165,8 @@ class PatioApplication:
 
         requested = os.getenv("LIFECYCLE_SIGNAL_SOURCE")
         mode = requested or "kubernetes"
-        in_cluster = bool(
-            os.getenv("LIFECYCLE_RI_NAME") and os.getenv("KUBERNETES_SERVICE_HOST")
-        )
+        in_cluster = bool(os.getenv("KUBERNETES_SERVICE_HOST"))
+        role_instance_name = os.getenv("LIFECYCLE_RI_NAME")
 
         # The signal source selects how signals are read. Clearing always
         # goes through the Kubernetes API: the downwardAPI file is read-only,
@@ -168,13 +174,21 @@ class PatioApplication:
         if mode == "file":
             # FileSignalSource validates the Kubernetes clear-path settings
             # eagerly instead of silently disabling hooks.
-            return FileSignalSource()
+            expected_signals = {signal for signal, _ in hook_bindings}
+            return FileSignalSource(expected_signals=expected_signals)
         if mode != "kubernetes":
             raise ValueError(
                 f"unsupported LIFECYCLE_SIGNAL_SOURCE: {mode!r} "
                 "(supported: kubernetes, file)"
             )
         if in_cluster:
+            if hook_bindings and not role_instance_name:
+                raise ValueError(
+                    "LIFECYCLE_RI_NAME is required when hook callbacks are "
+                    "configured inside Kubernetes"
+                )
+            if not role_instance_name:
+                return MemorySignalSource()
             return KubernetesSignalLabelSource()
         if requested is not None:
             raise ValueError(
@@ -234,10 +248,11 @@ class PatioApplication:
 
         await self.executor.run_start()
         self._stop_event.clear()
-        self._loop_task = asyncio.create_task(
-            self.executor.run_forever(self._stop_event),
-            name="patio-event-executor",
-        )
+        if self.executor.hook_bindings:
+            self._loop_task = asyncio.create_task(
+                self.executor.run_forever(self._stop_event),
+                name="patio-event-executor",
+            )
         if self._heartbeat_enabled:
             self._ensure_heartbeat_task()
             self.logger.info(
@@ -247,8 +262,9 @@ class PatioApplication:
 
     async def _on_hook_processed(self, signal: str) -> None:
         if signal in self._offboard_signals:
-            # The heartbeat was already suspended before the callback ran;
-            # this also covers clear failures that skip the normal path.
+            # The heartbeat was already suspended before the callback ran.
+            # Reassert the suspended state after a successful side effect,
+            # including when a later signal clear fails.
             self._suspend_heartbeat()
             return
         if signal in self._onboard_signals:
@@ -292,6 +308,10 @@ class PatioApplication:
         for task, name in tasks:
             if task is None:
                 continue
+            # Shutdown must be bounded.  If a hook or heartbeat callback is
+            # still in flight, cancel it so the end-callback budget is not
+            # consumed by an operation that is already being terminated.
+            task.cancel()
             try:
                 await task
             except asyncio.CancelledError:

@@ -59,6 +59,7 @@ class EventExecutor:
         signal_interval: float = 60.0,
         end_retry_times: int | None = None,
         end_retry_interval: float | None = None,
+        end_timeout: float | None = None,
         on_hook_processed: Callable[[str], Awaitable[None]] | None = None,
         logger=None,
     ):
@@ -85,6 +86,14 @@ class EventExecutor:
             if end_retry_interval is not None
             else self.retry_interval
         )
+        # End callbacks must fit inside the Pod termination grace period. A
+        # retry count alone is not a wall-clock budget, so bound the whole end
+        # phase as well.
+        self.end_timeout = (
+            float(end_timeout)
+            if end_timeout is not None
+            else 20.0
+        )
         # The downwardAPI label file lags behind RoleInstance label removal
         # by tens of seconds, so a cleared signal can be re-detected right
         # after its callback ran. Enforce a minimum interval between
@@ -105,6 +114,15 @@ class EventExecutor:
         for callback in callbacks:
             for attempt in range(1, retry_times + 1):
                 started = time.perf_counter()
+                callback_name = getattr(callback, "__name__", repr(callback))
+                self.logger.info(
+                    "event callback started",
+                    extra={
+                        "event": event,
+                        "callback": callback_name,
+                        "attempt": attempt,
+                    },
+                )
                 try:
                     await callback()
                 except Exception:
@@ -113,7 +131,7 @@ class EventExecutor:
                             "event callback failed",
                             extra={
                                 "event": event,
-                                "callback": getattr(callback, "__name__", repr(callback)),
+                        "callback": callback_name,
                                 "attempt": attempt,
                                 "duration": time.perf_counter() - started,
                             },
@@ -123,7 +141,7 @@ class EventExecutor:
                         "event callback failed, retrying",
                         extra={
                             "event": event,
-                            "callback": getattr(callback, "__name__", repr(callback)),
+                        "callback": callback_name,
                             "attempt": attempt,
                             "next_attempt_in": retry_interval,
                         },
@@ -134,7 +152,7 @@ class EventExecutor:
                         "event callback completed",
                         extra={
                             "event": event,
-                            "callback": getattr(callback, "__name__", repr(callback)),
+                        "callback": callback_name,
                             "attempt": attempt,
                             "duration": time.perf_counter() - started,
                         },
@@ -154,19 +172,37 @@ class EventExecutor:
     async def run_end(self) -> None:
         """Run all end callbacks in order."""
 
-        await self._run_callbacks(
-            self.end_callbacks,
-            "end",
-            self.end_retry_times,
-            self.end_retry_interval,
-        )
+        try:
+            await asyncio.wait_for(
+                self._run_callbacks(
+                    self.end_callbacks,
+                    "end",
+                    self.end_retry_times,
+                    self.end_retry_interval,
+                ),
+                timeout=self.end_timeout,
+            )
+        except asyncio.TimeoutError:
+            self.logger.error(
+                "end callback timeout exceeded",
+                extra={
+                    "timeout": self.end_timeout,
+                    "callbacks": [
+                        getattr(callback, "__name__", repr(callback))
+                        for callback in self.end_callbacks
+                    ],
+                },
+            )
 
     def _signal_ready(self, signal: str, now: float) -> bool:
         last = self._last_signal_run.get(signal)
         return last is None or now - last >= self.signal_interval
 
     async def run_once(self) -> int:
-        """Run at most one matching hook callback and clear its signal."""
+        """Run all matching, cooldown-eligible hook callbacks.
+
+        Returns the number of successfully processed signals.
+        """
 
         signals = await self.signal_source.signals()
         now = time.perf_counter()
@@ -230,6 +266,19 @@ class EventExecutor:
                 # failing signal.
                 continue
 
+            # Notify the application after the callback's side effect has
+            # succeeded.  A later clear failure must not undo an onboard or
+            # leave an offboard heartbeat suspended.
+            if self.on_hook_processed is not None:
+                try:
+                    await self.on_hook_processed(signal)
+                except Exception:
+                    self.logger.exception(
+                        "hook processed notification failed: signal=%s",
+                        signal,
+                        extra={"signal": signal},
+                    )
+
             try:
                 # Clearing is conditional on the processed signal value. In
                 # file mode a re-read can be stale, so the source itself must
@@ -266,15 +315,6 @@ class EventExecutor:
                     "duration": time.perf_counter() - started,
                 },
             )
-            if self.on_hook_processed is not None:
-                try:
-                    await self.on_hook_processed(signal)
-                except Exception:
-                    self.logger.exception(
-                        "hook processed notification failed: signal=%s",
-                        signal,
-                        extra={"signal": signal},
-                    )
             processed += 1
 
         return processed

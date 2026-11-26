@@ -16,6 +16,7 @@ from patio.events.models import EventConfigError, parse_event_callbacks, parse_s
 from patio.events.registry import register_callback, reset_callback_registry
 from patio.events.registry import callback_plugins
 from patio.application import PatioApplication, parse_worker_instance_info
+from patio.adapters.engine.factory import create_engine_probe
 from patio.adapters.engine.sglang import SGLangEngineProbe
 from patio.adapters.engine.vllm import VLLMEngineProbe
 from patio.adapters.router.sglang import SGLangRouterAdapter
@@ -193,6 +194,109 @@ event_callbacks:
     )
 
     await application.start()
+    await application.stop()
+
+    assert calls == ["ready", "add", "remove"]
+
+
+@pytest.mark.asyncio
+async def test_patio_application_does_not_poll_without_hooks(monkeypatch, tmp_path: Path):
+    class FakeRouterAdapter:
+        async def add(self) -> bool:
+            return True
+
+        async def remove(self) -> bool:
+            return True
+
+    class FakeEngineProbe:
+        async def ready(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "patio.application.create_router_adapter", lambda topo_type, worker_info: FakeRouterAdapter()
+    )
+    monkeypatch.setattr(
+        "patio.application.create_engine_probe", lambda topo_type, worker_info: FakeEngineProbe()
+    )
+    path = tmp_path / "events.yaml"
+    path.write_text(
+        """
+event_callbacks:
+  start:
+    - engine_wait_ready
+  end:
+    - router_offboard
+""",
+        encoding="utf-8",
+    )
+
+    application = PatioApplication(
+        worker_info={"port": 30000},
+        topo_type="sglang",
+        events_config=path,
+        signal_source=MemorySignalSource(),
+    )
+    await application.start()
+
+    assert application._loop_task is None
+
+    await application.stop()
+
+
+@pytest.mark.asyncio
+async def test_patio_application_runs_end_cleanup_after_startup_failure(
+    monkeypatch, tmp_path: Path
+):
+    calls: list[str] = []
+
+    class FakeRouterAdapter:
+        async def add(self) -> bool:
+            calls.append("add")
+            return True
+
+        async def remove(self) -> bool:
+            calls.append("remove")
+            return True
+
+    class FakeEngineProbe:
+        async def ready(self) -> bool:
+            calls.append("ready")
+            return True
+
+    @register_callback("custom_failure")
+    async def custom_failure() -> None:
+        raise RuntimeError("startup callback failed")
+
+    monkeypatch.setattr(
+        "patio.application.create_router_adapter", lambda topo_type, worker_info: FakeRouterAdapter()
+    )
+    monkeypatch.setattr(
+        "patio.application.create_engine_probe", lambda topo_type, worker_info: FakeEngineProbe()
+    )
+    path = tmp_path / "events.yaml"
+    path.write_text(
+        """
+event_callbacks:
+  start:
+    - engine_wait_ready
+    - router_onboard
+    - custom_failure
+  end:
+    - router_offboard
+""",
+        encoding="utf-8",
+    )
+    application = PatioApplication(
+        worker_info={"port": 30000},
+        topo_type="sglang",
+        events_config=path,
+        signal_source=MemorySignalSource(),
+        retry_times=1,
+        retry_interval=0,
+    )
+
+    with pytest.raises(RuntimeError, match="startup callback failed"):
+        await application.start()
     await application.stop()
 
     assert calls == ["ready", "add", "remove"]
@@ -1003,6 +1107,9 @@ async def test_file_signal_source_reads_labels_file(tmp_path: Path):
         def __init__(self):
             self.cleared: list[str] = []
 
+        async def signals(self) -> set[str]:
+            return {"patio.com/router=offboard"}
+
         async def clear(self, signal: str) -> None:
             self.cleared.append(signal)
 
@@ -1024,6 +1131,23 @@ async def test_file_signal_source_missing_file_is_empty(tmp_path: Path):
     source = FileSignalSource(
         labels_path=tmp_path / "missing", clear_source=FakeClearSource()
     )
+
+    assert await source.signals() == set()
+
+
+@pytest.mark.asyncio
+async def test_file_signal_source_rejects_non_authoritative_signal(tmp_path: Path):
+    path = tmp_path / "pod-labels"
+    path.write_text('patio.com/router="offboard"\n', encoding="utf-8")
+
+    class FakeClearSource:
+        async def signals(self) -> set[str]:
+            return set()
+
+        async def clear(self, signal: str) -> None:
+            raise AssertionError("should not be called")
+
+    source = FileSignalSource(labels_path=path, clear_source=FakeClearSource())
 
     assert await source.signals() == set()
 
@@ -1164,6 +1288,27 @@ async def test_event_executor_uses_separate_end_retry_budget():
     assert len(attempts) == 2
 
 
+@pytest.mark.asyncio
+async def test_event_executor_enforces_end_timeout():
+    started = asyncio.Event()
+
+    async def slow_callback() -> None:
+        started.set()
+        await asyncio.sleep(1)
+
+    executor = EventExecutor(
+        start_callbacks=(),
+        end_callbacks=(slow_callback,),
+        hook_bindings=(),
+        signal_source=MemorySignalSource(),
+        end_timeout=0.01,
+    )
+
+    await asyncio.wait_for(executor.run_end(), timeout=0.1)
+
+    assert started.is_set()
+
+
 def test_escape_json_pointer():
     assert _escape_json_pointer("patio.com/router") == "patio.com~1router"
     assert _escape_json_pointer("a~b/c") == "a~0b~1c"
@@ -1257,14 +1402,21 @@ async def test_vllm_engine_probe_checks_once(monkeypatch):
     monkeypatch.setattr("patio.adapters.engine.vllm.envs.TOPO_HEALTH_CHECK_TIMEOUT", 1)
     response = MagicMock()
     response.status_code = 200
-    client = MagicMock()
-
     with patch("patio.adapters.engine.vllm.requests.get", return_value=response) as get:
-        probe = VLLMEngineProbe(client, {"port": 8000})
+        probe = VLLMEngineProbe({"port": 8000})
         assert await probe.ready() is True
 
     get.assert_called_once()
-    client.wait_engine_ready.assert_not_called()
+
+
+def test_vllm_engine_probe_does_not_require_router_env(monkeypatch):
+    monkeypatch.delenv("RBG_GROUP_NAME", raising=False)
+    monkeypatch.delenv("ROUTER_ROLE_NAME", raising=False)
+    monkeypatch.delenv("ROUTER_PORT", raising=False)
+
+    probe = create_engine_probe("vllm", {"port": 8000})
+
+    assert isinstance(probe, VLLMEngineProbe)
 
 
 @pytest.mark.asyncio
@@ -1452,6 +1604,88 @@ event_callbacks:
     assert len(add_calls) > count_after_offboard
 
 
+@pytest.mark.asyncio
+async def test_application_resumes_heartbeat_when_clear_fails(
+    monkeypatch, tmp_path: Path
+):
+    add_calls: list[None] = []
+    remove_calls: list[None] = []
+
+    class FailingClearSource:
+        def __init__(self):
+            self.signal: str | None = None
+
+        async def signals(self) -> set[str]:
+            return {self.signal} if self.signal else set()
+
+        async def clear(self, signal: str) -> None:
+            raise RuntimeError("clear failed")
+
+    class FakeRouterAdapter:
+        async def add(self) -> bool:
+            add_calls.append(None)
+            return True
+
+        async def remove(self) -> bool:
+            remove_calls.append(None)
+            return True
+
+    class FakeEngineProbe:
+        async def ready(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "patio.application.create_router_adapter", lambda topo_type, worker_info: FakeRouterAdapter()
+    )
+    monkeypatch.setattr(
+        "patio.application.create_engine_probe", lambda topo_type, worker_info: FakeEngineProbe()
+    )
+    path = tmp_path / "events.yaml"
+    path.write_text(
+        """
+event_callbacks:
+  start:
+    - engine_wait_ready
+    - router_onboard
+  hook:
+    - signal: "patio.com/router=offboard"
+      callback: router_offboard
+    - signal: "patio.com/router=onboard"
+      callback: router_onboard
+""",
+        encoding="utf-8",
+    )
+    source = FailingClearSource()
+    application = PatioApplication(
+        worker_info={"port": 30000},
+        topo_type="sglang",
+        events_config=path,
+        signal_source=source,
+        poll_interval=0.01,
+        heartbeat_interval=0.01,
+        signal_interval=60,
+    )
+
+    await application.start()
+    source.signal = "patio.com/router=offboard"
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if remove_calls:
+            break
+
+    assert application._heartbeat_enabled is False
+    count_after_offboard = len(add_calls)
+
+    source.signal = "patio.com/router=onboard"
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if len(add_calls) > count_after_offboard:
+            break
+
+    assert application._heartbeat_enabled is True
+    await application.stop()
+
+
 def test_application_rejects_explicit_kubernetes_source_without_cluster(monkeypatch):
     monkeypatch.delenv("LIFECYCLE_RI_NAME", raising=False)
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
@@ -1459,6 +1693,16 @@ def test_application_rejects_explicit_kubernetes_source_without_cluster(monkeypa
 
     with pytest.raises(ValueError, match="requires LIFECYCLE_RI_NAME"):
         PatioApplication._select_signal_source(())
+
+
+def test_application_rejects_missing_ri_name_in_cluster(monkeypatch):
+    monkeypatch.delenv("LIFECYCLE_RI_NAME", raising=False)
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "kubernetes.default")
+
+    with pytest.raises(ValueError, match="LIFECYCLE_RI_NAME is required"):
+        PatioApplication._select_signal_source(
+            (("patio.com/router=offboard", None),)
+        )
 
 
 def test_application_rejects_file_source_without_clear_config(monkeypatch):
