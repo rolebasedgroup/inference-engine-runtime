@@ -14,6 +14,10 @@ EventCallback = Callable[[], Awaitable[None]]
 HookBinding = tuple[str, EventCallback]
 
 
+class SignalChangedError(RuntimeError):
+    """The signal value changed before Patio could clear it."""
+
+
 class SignalSource(Protocol):
     """A source of signals that should trigger hook callbacks."""
 
@@ -52,7 +56,9 @@ class EventExecutor:
         poll_interval: float = 1.0,
         retry_times: int = 60,
         retry_interval: float = 3.0,
-        signal_interval: float = 1.0,
+        signal_interval: float = 60.0,
+        end_retry_times: int | None = None,
+        end_retry_interval: float | None = None,
         on_hook_processed: Callable[[str], Awaitable[None]] | None = None,
         logger=None,
     ):
@@ -66,8 +72,21 @@ class EventExecutor:
         # semantics of the legacy topology client for transient failures.
         self.retry_times = max(1, int(retry_times))
         self.retry_interval = float(retry_interval)
+        # End callbacks run after SIGTERM and must finish inside the Pod's
+        # termination grace period. They get a separate, shorter budget so a
+        # retry loop does not end in SIGKILL.
+        self.end_retry_times = (
+            max(1, int(end_retry_times))
+            if end_retry_times is not None
+            else self.retry_times
+        )
+        self.end_retry_interval = (
+            float(end_retry_interval)
+            if end_retry_interval is not None
+            else self.retry_interval
+        )
         # The downwardAPI label file lags behind RoleInstance label removal
-        # by a few seconds, so a cleared signal can be re-detected right
+        # by tens of seconds, so a cleared signal can be re-detected right
         # after its callback ran. Enforce a minimum interval between
         # executions of the same signal instead of relying on callback
         # idempotency alone.
@@ -76,14 +95,20 @@ class EventExecutor:
         self.on_hook_processed = on_hook_processed
         self.logger = logger or init_logger(__name__)
 
-    async def _run_callbacks(self, callbacks: Sequence[EventCallback], event: str) -> None:
+    async def _run_callbacks(
+        self,
+        callbacks: Sequence[EventCallback],
+        event: str,
+        retry_times: int,
+        retry_interval: float,
+    ) -> None:
         for callback in callbacks:
-            for attempt in range(1, self.retry_times + 1):
+            for attempt in range(1, retry_times + 1):
                 started = time.perf_counter()
                 try:
                     await callback()
                 except Exception:
-                    if attempt >= self.retry_times:
+                    if attempt >= retry_times:
                         self.logger.exception(
                             "event callback failed",
                             extra={
@@ -100,10 +125,10 @@ class EventExecutor:
                             "event": event,
                             "callback": getattr(callback, "__name__", repr(callback)),
                             "attempt": attempt,
-                            "next_attempt_in": self.retry_interval,
+                            "next_attempt_in": retry_interval,
                         },
                     )
-                    await asyncio.sleep(self.retry_interval)
+                    await asyncio.sleep(retry_interval)
                 else:
                     self.logger.debug(
                         "event callback completed",
@@ -119,12 +144,22 @@ class EventExecutor:
     async def run_start(self) -> None:
         """Run all start callbacks in order."""
 
-        await self._run_callbacks(self.start_callbacks, "start")
+        await self._run_callbacks(
+            self.start_callbacks,
+            "start",
+            self.retry_times,
+            self.retry_interval,
+        )
 
     async def run_end(self) -> None:
         """Run all end callbacks in order."""
 
-        await self._run_callbacks(self.end_callbacks, "end")
+        await self._run_callbacks(
+            self.end_callbacks,
+            "end",
+            self.end_retry_times,
+            self.end_retry_interval,
+        )
 
     def _signal_ready(self, signal: str, now: float) -> bool:
         last = self._last_signal_run.get(signal)
@@ -163,6 +198,7 @@ class EventExecutor:
             },
         )
 
+        processed = 0
         for signal, callback in self.hook_bindings:
             if signal not in matching_signals:
                 continue
@@ -189,33 +225,35 @@ class EventExecutor:
                         "duration": time.perf_counter() - started,
                     },
                 )
-                return 0
+                # Continue with the other matching signals. Returning here
+                # would starve every binding configured after a persistently
+                # failing signal.
+                continue
 
             try:
-                # Re-read before clearing: the controller may have replaced the
-                # label value while the callback was running. Only remove the
-                # label when it still carries the processed signal.
-                current_signals = await self.signal_source.signals()
-                if signal in current_signals:
-                    await self.signal_source.clear(signal)
-                    self.logger.info(
-                        "hook signal cleared: signal=%s",
-                        signal,
-                        extra={"signal": signal},
-                    )
-                else:
-                    self.logger.warning(
-                        "signal changed while callback ran, skipping clear: signal=%s",
-                        signal,
-                        extra={"signal": signal},
-                    )
+                # Clearing is conditional on the processed signal value. In
+                # file mode a re-read can be stale, so the source itself must
+                # perform the value check atomically.
+                await self.signal_source.clear(signal)
+            except SignalChangedError:
+                self.logger.warning(
+                    "signal changed while callback ran, skipping clear: signal=%s",
+                    signal,
+                    extra={"signal": signal},
+                )
             except Exception:
                 self.logger.exception(
                     "failed to clear signal: signal=%s",
                     signal,
                     extra={"signal": signal},
                 )
-                return 0
+                continue
+
+            self.logger.info(
+                "hook signal cleared: signal=%s",
+                signal,
+                extra={"signal": signal},
+            )
 
             self.logger.info(
                 "hook callback completed: signal=%s callback=%s duration=%.3f",
@@ -237,9 +275,9 @@ class EventExecutor:
                         signal,
                         extra={"signal": signal},
                     )
-            return 1
+            processed += 1
 
-        return 0
+        return processed
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         """Poll the signal source until ``stop_event`` is set.

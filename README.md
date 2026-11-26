@@ -132,9 +132,31 @@ Set `LIFECYCLE_SIGNAL_SOURCE=file` to enable this mode. Reading from the
 file removes the per-second API polling; clearing a signal still goes through
 the API, because the downwardAPI file is read-only. After Patio clears the
 signal on the RoleInstance, RBG removes the Pod label and the kubelet
-refreshes the file (typically within a few seconds). Until the file is
-refreshed, Patio may observe the signal again, so hook callbacks must be
-idempotent.
+refreshes the file. The refresh depends on the kubelet sync period and label
+cache and can take tens of seconds (in some clusters up to about a minute).
+Patio suppresses repeat execution of the same signal value for
+`EVENT_SIGNAL_INTERVAL` seconds and hook callbacks must remain idempotent.
+
+Signal clearing is atomic on the API server: Patio sends a JSON Patch with a
+`test` of the processed signal value followed by `remove`. If the controller
+replaced the label while the callback ran, the patch fails and Patio leaves
+the new value untouched.
+
+#### Kubernetes RBAC
+
+Reading and clearing RoleInstance signals requires a ServiceAccount that can
+`get` and `patch` `roleinstances` in the pod namespace:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: patio-lifecycle-signals
+rules:
+- apiGroups: ["workloads.x-k8s.io"]
+  resources: ["roleinstances"]
+  verbs: ["get", "patch"]
+```
 
 
 ## Docker Image
@@ -227,7 +249,13 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `LIFECYCLE_SIGNAL_SOURCE` | How hook signals are read: `kubernetes` (API polling) or `file` (downwardAPI label file) | `kubernetes` |
 | `LIFECYCLE_SIGNAL_FILE` | Label file path for `LIFECYCLE_SIGNAL_SOURCE=file` | `/etc/patio/pod-labels` |
 | `LIFECYCLE_API_TIMEOUT` | Kubernetes API request timeout for signal reads and clears (seconds) | `10` |
-| `EVENT_SIGNAL_INTERVAL` | Minimum interval between executions of the same hook signal (seconds); suppresses re-detection from a stale downwardAPI label file | `1` |
+| `LIFECYCLE_API_INSECURE` | Skip Kubernetes API TLS verification; required explicitly for insecure test deployments | `false` |
+| `EVENT_POLL_INTERVAL` | Delay between signal-polling iterations when no hook was processed (seconds) | `1` |
+| `EVENT_CALLBACK_RETRY_TIMES` | Maximum attempts for start callbacks and hook callback execution | `60` |
+| `EVENT_CALLBACK_RETRY_INTERVAL` | Delay between start and hook callback retries (seconds) | `3` |
+| `EVENT_END_CALLBACK_RETRY_TIMES` | Maximum attempts for end callbacks; must fit `terminationGracePeriodSeconds` | `5` |
+| `EVENT_END_CALLBACK_RETRY_INTERVAL` | Delay between end callback retries (seconds) | `1` |
+| `EVENT_SIGNAL_INTERVAL` | Minimum interval between executions of the same hook signal (seconds); suppresses re-detection from a stale downwardAPI label file | `60` |
 
 ## Usage with RoleBasedGroup
 

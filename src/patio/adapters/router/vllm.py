@@ -9,7 +9,11 @@ from typing import Any
 import requests
 
 from patio import envs
-from patio.adapters.router.base import MembershipState, RouterAdapter
+from patio.adapters.router.base import (
+    MembershipState,
+    RouterAdapter,
+    is_dns_resolution_failure,
+)
 
 
 class VLLMRouterAdapter(RouterAdapter):
@@ -71,11 +75,19 @@ class VLLMRouterAdapter(RouterAdapter):
 
     async def remove(self) -> bool:
         def unregister() -> bool:
-            response = requests.post(
-                f"http://{self.proxy_endpoint}/instances/remove",
-                json=self._payload(),
-                timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
-            )
+            try:
+                response = requests.post(
+                    f"http://{self.proxy_endpoint}/instances/remove",
+                    json=self._payload(),
+                    timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
+                )
+            except requests.exceptions.ConnectionError as exc:
+                # Deleting an RBG can remove the router before the engine's
+                # preDelete hook runs. If the router DNS name is already gone,
+                # there is no router membership left to remove.
+                if is_dns_resolution_failure(exc):
+                    return True
+                raise
             return 200 <= response.status_code < 300
 
         return await asyncio.to_thread(unregister)

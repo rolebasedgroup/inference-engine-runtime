@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import requests
 from urllib.parse import urljoin
 
-import requests
 from prometheus_client.parser import text_string_to_metric_families
 
 from patio import envs
@@ -14,14 +15,27 @@ from patio.topo.client.vllm_topo_client import VLLMProxyTopoClient
 
 
 class VLLMEngineProbe(EngineProbe):
-    """Adapter around the existing vLLM engine readiness check."""
+    """Single-shot vLLM engine readiness and quiescence checks."""
 
     def __init__(self, client: VLLMProxyTopoClient, worker_info: dict):
         self.client = client
         self.worker_info = worker_info
 
     async def ready(self) -> bool:
-        return await asyncio.to_thread(self.client.wait_engine_ready, self.worker_info)
+        def check() -> bool:
+            response = requests.get(
+                self.health_endpoint,
+                timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_HEALTH_CHECK_TIMEOUT),
+            )
+            return response.status_code == 200
+
+        return await asyncio.to_thread(check)
+
+    @property
+    def health_endpoint(self) -> str:
+        port = self.worker_info.get("port", "8000")
+        host = os.getenv("POD_IP") or "localhost"
+        return f"http://{host}:{port}/health"
 
     async def quiescent(self) -> bool:
         return await asyncio.to_thread(self._quiescent_sync)

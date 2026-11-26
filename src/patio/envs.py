@@ -35,6 +35,58 @@ _topo_register_endpoint = os.getenv("TOPO_REGISTER_ENDPOINT")
 HEALTH_CHECK_INTERVAL = os.getenv("HEALTH_CHECK_INTERVAL", 300)
 HEARTBEAT_INTERVAL = os.getenv("HEARTBEAT_INTERVAL", 10)
 
+# Event callback defaults. The helpers read the process environment lazily so
+# tests and embedded callers can override it with monkeypatch.
+EVENT_POLL_INTERVAL = "1"
+EVENT_CALLBACK_RETRY_TIMES = "60"
+EVENT_CALLBACK_RETRY_INTERVAL = "3"
+# End callbacks must fit inside a Pod's termination grace period. The legacy
+# 60 x 3s retry loop is too long for the default 30s grace period.
+EVENT_END_CALLBACK_RETRY_TIMES = "5"
+EVENT_END_CALLBACK_RETRY_INTERVAL = "1"
+# The downwardAPI label file can lag label removal by tens of seconds.
+EVENT_SIGNAL_INTERVAL = "60"
+
+
+def get_event_poll_interval() -> float:
+    return float(os.getenv("EVENT_POLL_INTERVAL", EVENT_POLL_INTERVAL))
+
+
+def get_event_callback_retry_times() -> int:
+    return int(os.getenv("EVENT_CALLBACK_RETRY_TIMES", EVENT_CALLBACK_RETRY_TIMES))
+
+
+def get_event_callback_retry_interval() -> float:
+    return float(
+        os.getenv("EVENT_CALLBACK_RETRY_INTERVAL", EVENT_CALLBACK_RETRY_INTERVAL)
+    )
+
+
+def get_event_end_callback_retry_times() -> int:
+    return int(
+        os.getenv("EVENT_END_CALLBACK_RETRY_TIMES", EVENT_END_CALLBACK_RETRY_TIMES)
+    )
+
+
+def get_event_end_callback_retry_interval() -> float:
+    return float(
+        os.getenv(
+            "EVENT_END_CALLBACK_RETRY_INTERVAL", EVENT_END_CALLBACK_RETRY_INTERVAL
+        )
+    )
+
+
+def get_event_signal_interval() -> float:
+    return float(os.getenv("EVENT_SIGNAL_INTERVAL", EVENT_SIGNAL_INTERVAL))
+
+
+def is_lifecycle_api_insecure() -> bool:
+    return os.getenv("LIFECYCLE_API_INSECURE", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
 # RBG Env
 GROUP_NAME = os.getenv("RBG_GROUP_NAME")
 ROLE_NAME = os.getenv("RBG_ROLE_NAME")

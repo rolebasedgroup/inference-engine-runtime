@@ -15,7 +15,8 @@ def create_engine_probe(topo_type: str, worker_info: dict) -> EngineProbe:
     if normalized == "sglang":
         return SGLangEngineProbe(worker_info)
     if normalized == "vllm":
-        # The vLLM probe reuses the legacy client's readiness retry logic.
+        # The probe keeps the legacy client for compatibility; readiness is a
+        # single bounded check and the event executor owns retries.
         client = create_topo_client(normalized, worker_info)
         return VLLMEngineProbe(client, worker_info)
     raise ValueError(f"unsupported topology type: {topo_type}")

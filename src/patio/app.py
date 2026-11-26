@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import asynccontextmanager
 from urllib.parse import urljoin
 from prometheus_client import REGISTRY
 
@@ -157,13 +158,17 @@ def _configure_event_application(
     global patio_application
     patio_application = application
 
-    @app.on_event("startup")
-    async def start_event_application() -> None:
+    @asynccontextmanager
+    async def event_application_lifespan(_app: FastAPI):
         await application.start()
+        try:
+            yield
+        finally:
+            await application.stop()
 
-    @app.on_event("shutdown")
-    async def stop_event_application() -> None:
-        await application.stop()
+    # FastAPI deprecated the @app.on_event startup/shutdown decorators in
+    # favor of a router lifespan context.
+    app.router.lifespan_context = event_application_lifespan
 
     logger.info(
         "event callback application configured",

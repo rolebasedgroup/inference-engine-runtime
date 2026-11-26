@@ -9,6 +9,9 @@ from typing import Any
 
 import aiohttp
 
+from patio import envs
+from patio.events.executor import SignalChangedError
+
 
 class KubernetesSignalLabelSource:
     """
@@ -76,8 +79,14 @@ class KubernetesSignalLabelSource:
         }
 
     def _ssl_context(self) -> ssl.SSLContext | bool:
-        if not Path(self.ca_path).exists():
+        if envs.is_lifecycle_api_insecure():
             return False
+        if not Path(self.ca_path).exists():
+            raise FileNotFoundError(
+                "Kubernetes CA certificate not found: "
+                f"{self.ca_path}; set LIFECYCLE_API_INSECURE=true only for "
+                "explicitly insecure deployments"
+            )
         return ssl.create_default_context(cafile=self.ca_path)
 
     async def signals(self) -> set[str]:
@@ -99,15 +108,23 @@ class KubernetesSignalLabelSource:
         return {f"{key}={value}" for key, value in labels.items()}
 
     async def clear(self, signal: str) -> None:
-        """Remove one label using a JSON Merge Patch."""
+        """Atomically remove one label using a JSON Patch test and remove."""
 
         if signal.count("=") != 1:
             raise ValueError(f"invalid signal: {signal!r}")
-        key = signal.split("=", 1)[0]
+        key, value = signal.split("=", 1)
 
-        patch = {"metadata": {"labels": {key: None}}}
+        # A merge patch removes the label without checking its value, so a
+        # controller update between the callback and this request could be
+        # discarded. The test operation makes removal conditional on the
+        # signal value that Patio actually processed.
+        label_path = f"/metadata/labels/{_escape_json_pointer(key)}"
+        patch = [
+            {"op": "test", "path": label_path, "value": value},
+            {"op": "remove", "path": label_path},
+        ]
         headers = self._headers()
-        headers["Content-Type"] = "application/merge-patch+json"
+        headers["Content-Type"] = "application/json-patch+json"
 
         async with aiohttp.ClientSession() as session:
             async with session.patch(
@@ -117,6 +134,10 @@ class KubernetesSignalLabelSource:
                 ssl=self._ssl_context(),
                 timeout=self.request_timeout,
             ) as response:
+                if response.status == 422:
+                    raise SignalChangedError(
+                        f"signal changed before clear: {signal!r}"
+                    ) from None
                 response.raise_for_status()
 
 
@@ -125,6 +146,12 @@ def _read_file(path: str) -> str | None:
         return Path(path).read_text(encoding="utf-8").strip()
     except OSError:
         return None
+
+
+def _escape_json_pointer(value: str) -> str:
+    """Escape one label key for use inside a JSON Patch path."""
+
+    return value.replace("~", "~0").replace("/", "~1")
 
 
 def _default_api_server() -> str | None:

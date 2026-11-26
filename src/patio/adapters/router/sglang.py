@@ -10,7 +10,11 @@ import requests
 from urllib.parse import quote
 
 from patio import envs
-from patio.adapters.router.base import MembershipState, RouterAdapter
+from patio.adapters.router.base import (
+    MembershipState,
+    RouterAdapter,
+    is_dns_resolution_failure,
+)
 
 
 class SGLangRouterAdapter(RouterAdapter):
@@ -102,7 +106,7 @@ class SGLangRouterAdapter(RouterAdapter):
                 # Deleting an RBG can remove the router before the engine's
                 # preDelete hook runs. If the router DNS name is already gone,
                 # there is no router membership left to remove.
-                if "Name does not resolve" in str(exc) or "Failed to resolve" in str(exc):
+                if is_dns_resolution_failure(exc):
                     return True
                 raise
             if worker_id is None:
