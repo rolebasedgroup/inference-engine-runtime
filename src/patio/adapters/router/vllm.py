@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from typing import Any
 
-import requests
+import httpx
 
 from patio import envs
 from patio.adapters.router.base import (
@@ -81,15 +80,14 @@ class VLLMRouterAdapter(RouterAdapter):
         return not isinstance(body, dict) or "error" not in body
 
     async def add(self) -> bool:
-        def register() -> bool:
-            response = requests.post(
+        async with httpx.AsyncClient(
+            timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT)
+        ) as client:
+            response = await client.post(
                 f"http://{self.proxy_endpoint}/instances/add",
                 json=self._payload(),
-                timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
             )
-            return self._request_succeeded(response)
-
-        return await asyncio.to_thread(register)
+        return self._request_succeeded(response)
 
     async def remove(self) -> bool:
         # vLLM's proxy examples do not expose a stable removal API. Preserve

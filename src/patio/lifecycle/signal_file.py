@@ -40,6 +40,8 @@ class FileSignalSource:
         # The clear path needs the RoleInstance name and in-cluster API access.
         self._clear_source = clear_source or KubernetesSignalLabelSource()
         self._expected_signals = expected_signals
+        self._last_signature: tuple[int, str] | None = None
+        self._last_authoritative: set[str] | None = None
 
     async def signals(self) -> set[str]:
         """Return the labels currently projected into the file.
@@ -58,12 +60,29 @@ class FileSignalSource:
         if not signals:
             return set()
 
+        signature = (self.labels_path.stat().st_mtime_ns, content)
+        if self._last_signature == signature and self._last_authoritative is not None:
+            return signals & self._last_authoritative
+
         # The downwardAPI file is a non-authoritative mirror of Pod labels.
         # Before any callback side effect runs, validate the candidate signals
         # against the RoleInstance labels.  This keeps file mode from turning a
         # forged Pod label into an offboard/onboard command.
-        authoritative = await self._clear_source.signals()
+        try:
+            authoritative = await self._clear_source.signals()
+        except Exception:
+            self._last_signature = None
+            self._last_authoritative = None
+            raise
+
+        self._last_signature = signature
+        self._last_authoritative = authoritative
         return signals & authoritative
+
+    async def validate(self) -> None:
+        """Validate Kubernetes credentials and RBAC at startup."""
+
+        await self._clear_source.signals()
 
     async def clear(self, signal: str) -> None:
         """Clear the signal on the RoleInstance through the Kubernetes API."""

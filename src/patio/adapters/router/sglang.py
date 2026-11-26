@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from typing import Any
 
-import requests
+import httpx
 from urllib.parse import quote
 
 from patio import envs
@@ -56,33 +55,32 @@ class SGLangRouterAdapter(RouterAdapter):
         payload["url"] = f"http://{self.worker_endpoint}"
         payload.pop("port", None)
 
-        def register() -> bool:
-            response = requests.post(
+        async with httpx.AsyncClient(
+            timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT)
+        ) as client:
+            response = await client.post(
                 f"http://{self.router_endpoint}/workers",
                 json=payload,
-                timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
             )
-            if response.status_code != 202:
-                return False
-            worker_id = response.json().get("worker_id")
-            if not worker_id:
-                return False
-            self.worker_id = worker_id
-            return True
+        if response.status_code != 202:
+            return False
+        worker_id = response.json().get("worker_id")
+        if not worker_id:
+            return False
+        self.worker_id = worker_id
+        return True
 
-        return await asyncio.to_thread(register)
-
-    def _lookup_worker_id_sync(self) -> str | None:
+    async def _lookup_worker_id(self) -> str | None:
         """Find this worker's id in the router by matching its URL.
 
         The worker id is opaque: routers up to 0.2.x use the worker URL, and
         0.3.0+ use a UUID. Matching by URL works for both.
         """
 
-        response = requests.get(
-            f"http://{self.router_endpoint}/workers",
-            timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
-        )
+        async with httpx.AsyncClient(
+            timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT)
+        ) as client:
+            response = await client.get(f"http://{self.router_endpoint}/workers")
         if response.status_code != 200:
             raise RuntimeError(
                 f"failed to list router workers: HTTP {response.status_code}"
@@ -96,34 +94,33 @@ class SGLangRouterAdapter(RouterAdapter):
         return None
 
     async def remove(self) -> bool:
-        def unregister() -> bool:
-            # Do not rely on the registration performed by this process: the
-            # events.yaml may omit start callbacks, or the process may have
-            # restarted since onboarding. Ask the router for the current id.
-            try:
-                worker_id = self._lookup_worker_id_sync()
-            except requests.exceptions.ConnectionError as exc:
-                # Deleting an RBG can remove the router before the engine's
-                # preDelete hook runs. If the router DNS name is already gone,
-                # there is no router membership left to remove.
-                if is_dns_resolution_failure(exc):
-                    return True
-                raise
-            if worker_id is None:
-                # This worker URL is not registered; offboard is complete.
-                return True
-            encoded_id = quote(worker_id, safe="")
-            response = requests.delete(
+        # Do not rely on the registration performed by this process: the
+        # events.yaml may omit start callbacks, or the process may have
+        # restarted since onboarding. Ask the router for the current id.
+        try:
+            worker_id = await self._lookup_worker_id()
+        except httpx.ConnectError as exc:
+            # A DNS failure does not prove that the router was deleted; CoreDNS
+            # or the network may be temporarily unavailable. Return failure and
+            # let the executor retry rather than clearing the signal early.
+            if is_dns_resolution_failure(exc):
+                return False
+            raise
+        if worker_id is None:
+            # This worker URL is not registered; offboard is complete.
+            return True
+        encoded_id = quote(worker_id, safe="")
+        async with httpx.AsyncClient(
+            timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT)
+        ) as client:
+            response = await client.delete(
                 f"http://{self.router_endpoint}/workers/{encoded_id}",
-                timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
             )
-            if response.status_code in (202, 404):
-                # 404 means another actor already removed the worker.
-                self.worker_id = None
-                return True
-            return False
-
-        return await asyncio.to_thread(unregister)
+        if response.status_code in (202, 404):
+            # 404 means another actor already removed the worker.
+            self.worker_id = None
+            return True
+        return False
 
     async def query(self) -> MembershipState:
         # The SGLang router does not currently expose a reliable query API.

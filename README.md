@@ -145,6 +145,8 @@ Patio suppresses repeat execution of the same signal value for
 Before a hook callback runs, Patio validates the signal from the downwardAPI
 file against the authoritative RoleInstance label. This prevents a forged Pod
 label from triggering an offboard or onboard action.
+The authoritative result is cached until the label file changes, so a stale
+downwardAPI projection does not reintroduce per-second API polling.
 
 Signal clearing is atomic on the API server: Patio sends a JSON Patch with a
 `test` of the processed signal value followed by `remove`. If the controller
@@ -264,7 +266,7 @@ python -m patio.app --host 127.0.0.1 --port 9091
 | `EVENT_CALLBACK_RETRY_INTERVAL` | Delay between start and end callback retries (seconds) | `3` |
 | `EVENT_END_CALLBACK_RETRY_TIMES` | Maximum attempts for end callbacks; must fit `terminationGracePeriodSeconds` | `5` |
 | `EVENT_END_CALLBACK_RETRY_INTERVAL` | Delay between end callback retries (seconds) | `1` |
-| `EVENT_END_CALLBACK_TIMEOUT` | Total wall-clock budget for all end callbacks (seconds) | `20` |
+| `EVENT_END_CALLBACK_TIMEOUT` | Total wall-clock budget for all end callbacks (seconds) | `15` |
 | `EVENT_SIGNAL_INTERVAL` | Minimum interval between executions of the same hook signal (seconds); suppresses re-detection from a stale downwardAPI label file | `60` |
 
 Hook callbacks are retried by the signal polling loop. The same signal value is

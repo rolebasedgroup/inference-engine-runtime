@@ -107,6 +107,11 @@ class KubernetesSignalLabelSource:
             raise RuntimeError("RoleInstance metadata.labels is not an object")
         return {f"{key}={value}" for key, value in labels.items()}
 
+    async def validate(self) -> None:
+        """Validate credentials, RBAC, and API access at startup."""
+
+        await self.signals()
+
     async def clear(self, signal: str) -> None:
         """Atomically remove one label using a JSON Patch test and remove."""
 

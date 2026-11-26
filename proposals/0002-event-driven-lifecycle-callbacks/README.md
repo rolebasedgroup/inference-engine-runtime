@@ -108,7 +108,9 @@ RBG Controller     RoleInstance/Pod labels       Patio Sidecar
 - `kubernetes`: poll RoleInstance labels through the API.
 - `file`: read labels from a downwardAPI projection; clearing still goes
   through the API. Before executing a hook, the file source validates the
-  candidate signal against the authoritative RoleInstance label.
+  candidate signal against the authoritative RoleInstance label. The
+  authoritative result is cached until the label file changes, avoiding
+  per-second API polling while a stale projection repeats the same signal.
 - An explicitly configured source is validated at startup. Without an explicit
   configuration and outside a cluster, Patio falls back to an empty in-memory
   source and warns when hooks are configured.
@@ -129,8 +131,9 @@ suspended heartbeat.
 #### Error handling
 
 Readiness probes perform one bounded check and let the executor own retry
-policy. Deleted router DNS names during offboard are treated as successful
-removal. Kubernetes API TLS verification fails closed unless
+policy. DNS resolution failures during offboard are retried rather than being
+assumed to mean the router was deleted. Kubernetes API TLS verification fails
+closed unless
 `LIFECYCLE_API_INSECURE=true` is explicitly set.
 
 ### Configuration
@@ -147,7 +150,7 @@ removal. Kubernetes API TLS verification fails closed unless
 | `EVENT_CALLBACK_RETRY_INTERVAL` | `3` | Start/end retry delay |
 | `EVENT_END_CALLBACK_RETRY_TIMES` | `5` | End attempts |
 | `EVENT_END_CALLBACK_RETRY_INTERVAL` | `1` | End retry delay |
-| `EVENT_END_CALLBACK_TIMEOUT` | `20` | Total end wall-clock budget |
+| `EVENT_END_CALLBACK_TIMEOUT` | `15` | Total end wall-clock budget |
 | `EVENT_SIGNAL_INTERVAL` | `60` | Same-signal execution cooldown |
 
 Hook callbacks are retried by the signal polling loop; `EVENT_CALLBACK_RETRY_*`
@@ -162,6 +165,8 @@ when `router_onboard` is configured as a start callback. Existing environment
 variables remain unchanged. Rollback is removing `--events-config` from the
 container command, or clearing `EVENTS_CONFIG` when the event path was enabled
 through the environment variable.
+The event path uses the FastAPI lifespan and Uvicorn graceful-shutdown APIs;
+the package therefore requires FastAPI 0.93 or later and Uvicorn 0.19 or later.
 
 ### Observability
 
@@ -253,6 +258,9 @@ restart re-enable registration after an explicit offboard?
   no-op behavior, and this proposal.
 - 2026-11-26: Bounded shutdown, startup cleanup, file signal authority
   validation, and polling scope fixes.
+- 2026-11-26: Replaced blocking router/engine HTTP calls with cancellable
+  async clients, raised the FastAPI/Uvicorn minimum versions, and bounded the
+  end callback budget below the default termination grace period.
 
 ## References
 

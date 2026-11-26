@@ -5,10 +5,10 @@ import logging
 import socket
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import requests
+import httpx
 
 from patio.events.executor import EventExecutor, MemorySignalSource
 from patio.events.loader import load_event_bindings
@@ -303,6 +303,51 @@ event_callbacks:
 
 
 @pytest.mark.asyncio
+async def test_patio_application_validates_signal_source_at_startup(
+    monkeypatch, tmp_path: Path
+):
+    class FakeRouterAdapter:
+        async def add(self) -> bool:
+            return True
+
+        async def remove(self) -> bool:
+            return True
+
+    class FakeEngineProbe:
+        async def ready(self) -> bool:
+            return True
+
+    class InvalidSignalSource(MemorySignalSource):
+        async def validate(self) -> None:
+            raise RuntimeError("signal source unavailable")
+
+    monkeypatch.setattr(
+        "patio.application.create_router_adapter", lambda topo_type, worker_info: FakeRouterAdapter()
+    )
+    monkeypatch.setattr(
+        "patio.application.create_engine_probe", lambda topo_type, worker_info: FakeEngineProbe()
+    )
+    path = tmp_path / "events.yaml"
+    path.write_text(
+        """
+event_callbacks:
+  start:
+    - engine_wait_ready
+""",
+        encoding="utf-8",
+    )
+    application = PatioApplication(
+        worker_info={"port": 30000},
+        topo_type="sglang",
+        events_config=path,
+        signal_source=InvalidSignalSource(),
+    )
+
+    with pytest.raises(RuntimeError, match="signal source unavailable"):
+        await application.start()
+
+
+@pytest.mark.asyncio
 async def test_sglang_engine_probe_reports_quiescent(monkeypatch):
     monkeypatch.setattr("patio.adapters.engine.sglang.envs.INFERENCE_ENGINE_ENDPOINT", "http://engine")
     monkeypatch.setattr("patio.adapters.engine.sglang.envs.METRIC_SCRAPE_PATH", "/metrics")
@@ -320,7 +365,11 @@ sglang:num_running_reqs 0
 sglang:num_queue_reqs 0
 """
 
-    with patch("patio.adapters.engine.sglang.requests.get", return_value=response):
+    fake_client = _FakeAsyncHttpClient({"get": [response]})
+    with patch(
+        "patio.adapters.engine.sglang.httpx.AsyncClient",
+        lambda *args, **kwargs: fake_client,
+    ):
         probe = SGLangEngineProbe({})
         assert await probe.quiescent() is True
 
@@ -468,6 +517,32 @@ def _get_response(payload: dict, status_code: int = 200):
     return response
 
 
+class _FakeAsyncHttpClient:
+    """A minimal async context-manager client for router adapter tests."""
+
+    def __init__(self, responses: dict[str, list]):
+        self.responses = {key: list(value) for key, value in responses.items()}
+        self.calls: dict[str, list] = {key: [] for key in ("get", "post", "delete")}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, url):
+        self.calls["get"].append(url)
+        return self.responses["get"].pop(0)
+
+    async def post(self, url, json=None):
+        self.calls["post"].append((url, json))
+        return self.responses["post"].pop(0)
+
+    async def delete(self, url):
+        self.calls["delete"].append(url)
+        return self.responses["delete"].pop(0)
+
+
 @pytest.mark.asyncio
 async def test_sglang_router_remove_reconciles_uuid_worker_id(monkeypatch):
     _configure_sglang_router_env(monkeypatch)
@@ -478,15 +553,16 @@ async def test_sglang_router_remove_reconciles_uuid_worker_id(monkeypatch):
     )
     delete_response = _get_response({"status": "accepted"}, status_code=202)
 
-    with (
-        patch("patio.adapters.router.sglang.requests.get", return_value=list_response) as get,
-        patch("patio.adapters.router.sglang.requests.delete", return_value=delete_response) as delete,
+    fake_client = _FakeAsyncHttpClient({"get": [list_response], "delete": [delete_response]})
+    with patch(
+        "patio.adapters.router.sglang.httpx.AsyncClient",
+        lambda *args, **kwargs: fake_client,
     ):
         assert await adapter.remove() is True
 
-    get.assert_called_once()
-    delete.assert_called_once()
-    url = delete.call_args.args[0]
+    assert len(fake_client.calls["get"]) == 1
+    assert len(fake_client.calls["delete"]) == 1
+    url = fake_client.calls["delete"][0]
     assert url.endswith("/workers/2f3a0c3e-0000-0000-0000-1b7d4c3a6e1f")
 
 
@@ -500,13 +576,14 @@ async def test_sglang_router_remove_reconciles_legacy_url_worker_id(monkeypatch)
     )
     delete_response = _get_response({"status": "accepted"}, status_code=202)
 
-    with (
-        patch("patio.adapters.router.sglang.requests.get", return_value=list_response),
-        patch("patio.adapters.router.sglang.requests.delete", return_value=delete_response) as delete,
+    fake_client = _FakeAsyncHttpClient({"get": [list_response], "delete": [delete_response]})
+    with patch(
+        "patio.adapters.router.sglang.httpx.AsyncClient",
+        lambda *args, **kwargs: fake_client,
     ):
         assert await adapter.remove() is True
 
-    url = delete.call_args.args[0]
+    url = fake_client.calls["delete"][0]
     assert url.endswith("/workers/http%3A%2F%2F1.2.3.4%3A30000")
 
 
@@ -515,38 +592,32 @@ async def test_sglang_router_remove_is_noop_when_not_registered(monkeypatch):
     _configure_sglang_router_env(monkeypatch)
     adapter = SGLangRouterAdapter({"port": "30000"})
 
-    with (
-        patch(
-            "patio.adapters.router.sglang.requests.get",
-            return_value=_get_response({"workers": []}),
-        ) as get,
-        patch("patio.adapters.router.sglang.requests.delete") as delete,
+    fake_client = _FakeAsyncHttpClient({"get": [_get_response({"workers": []})], "delete": []})
+    with patch(
+        "patio.adapters.router.sglang.httpx.AsyncClient",
+        lambda *args, **kwargs: fake_client,
     ):
         assert await adapter.remove() is True
 
-    get.assert_called_once()
-    delete.assert_not_called()
+    assert len(fake_client.calls["get"]) == 1
+    assert fake_client.calls["delete"] == []
 
 
 @pytest.mark.asyncio
-async def test_sglang_router_remove_treats_deleted_router_dns_as_success(monkeypatch):
+async def test_sglang_router_remove_reports_dns_failure(monkeypatch):
     _configure_sglang_router_env(monkeypatch)
     adapter = SGLangRouterAdapter({"port": "30000"})
     dns_error = socket.gaierror(-2, "Name does not resolve")
-    urllib_error = requests.exceptions.ConnectionError(
-        "HTTPConnectionPool(host='missing', port=8000)"
-    )
-    urllib_error.__cause__ = dns_error
-    error = requests.exceptions.ConnectionError(urllib_error)
-    error.__cause__ = urllib_error
+    error = httpx.ConnectError("Connection failed")
+    error.__cause__ = dns_error
 
     with (
-        patch("patio.adapters.router.sglang.requests.get", side_effect=error),
-        patch("patio.adapters.router.sglang.requests.delete") as delete,
+        patch.object(adapter, "_lookup_worker_id", AsyncMock(side_effect=error)),
+        patch("patio.adapters.router.sglang.httpx.AsyncClient") as client,
     ):
-        assert await adapter.remove() is True
+        assert await adapter.remove() is False
 
-    delete.assert_not_called()
+    client.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -554,17 +625,15 @@ async def test_sglang_router_remove_treats_404_as_success(monkeypatch):
     _configure_sglang_router_env(monkeypatch)
     adapter = SGLangRouterAdapter({"port": "30000"})
 
-    with (
-        patch(
-            "patio.adapters.router.sglang.requests.get",
-            return_value=_get_response(
-                {"workers": [{"id": "id-1", "url": "http://1.2.3.4:30000"}]}
-            ),
-        ),
-        patch(
-            "patio.adapters.router.sglang.requests.delete",
-            return_value=_get_response({"error": "not found"}, status_code=404),
-        ),
+    fake_client = _FakeAsyncHttpClient(
+        {
+            "get": [_get_response({"workers": [{"id": "id-1", "url": "http://1.2.3.4:30000"}]})],
+            "delete": [_get_response({"error": "not found"}, status_code=404)],
+        }
+    )
+    with patch(
+        "patio.adapters.router.sglang.httpx.AsyncClient",
+        lambda *args, **kwargs: fake_client,
     ):
         assert await adapter.remove() is True
 
@@ -574,17 +643,15 @@ async def test_sglang_router_remove_reports_failure(monkeypatch):
     _configure_sglang_router_env(monkeypatch)
     adapter = SGLangRouterAdapter({"port": "30000"})
 
-    with (
-        patch(
-            "patio.adapters.router.sglang.requests.get",
-            return_value=_get_response(
-                {"workers": [{"id": "id-1", "url": "http://1.2.3.4:30000"}]}
-            ),
-        ),
-        patch(
-            "patio.adapters.router.sglang.requests.delete",
-            return_value=_get_response({"error": "boom"}, status_code=500),
-        ),
+    fake_client = _FakeAsyncHttpClient(
+        {
+            "get": [_get_response({"workers": [{"id": "id-1", "url": "http://1.2.3.4:30000"}]})],
+            "delete": [_get_response({"error": "boom"}, status_code=500)],
+        }
+    )
+    with patch(
+        "patio.adapters.router.sglang.httpx.AsyncClient",
+        lambda *args, **kwargs: fake_client,
     ):
         assert await adapter.remove() is False
 
@@ -594,13 +661,16 @@ async def test_vllm_router_add_sends_both_payload_fields(monkeypatch):
     _configure_vllm_router_env(monkeypatch)
     adapter = VLLMRouterAdapter({"type": "prefill", "instance": "1.2.3.4:8000"})
 
+    fake_client = _FakeAsyncHttpClient(
+        {"post": [_get_response({"message": "added"})]}
+    )
     with patch(
-        "patio.adapters.router.vllm.requests.post",
-        return_value=_get_response({"message": "added"}),
-    ) as post:
+        "patio.adapters.router.vllm.httpx.AsyncClient",
+        lambda *args, **kwargs: fake_client,
+    ):
         assert await adapter.add() is True
 
-    assert post.call_args.kwargs["json"] == {
+    assert fake_client.calls["post"][0][1] == {
         "type": "prefill",
         "instance": "1.2.3.4:8000",
         "instances": ["1.2.3.4:8000"],
@@ -612,10 +682,10 @@ async def test_vllm_router_remove_is_noop(monkeypatch):
     _configure_vllm_router_env(monkeypatch)
     adapter = VLLMRouterAdapter({"type": "prefill", "instance": "1.2.3.4:8000"})
 
-    with patch("patio.adapters.router.vllm.requests.post") as post:
+    with patch("patio.adapters.router.vllm.httpx.AsyncClient") as client:
         assert await adapter.remove() is True
 
-    post.assert_not_called()
+    client.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -777,6 +847,62 @@ event_callbacks:
     await application.stop()
 
     assert len(add_calls) > 1
+
+
+@pytest.mark.asyncio
+async def test_patio_application_heartbeat_retries_transient_failure(
+    monkeypatch, tmp_path: Path
+):
+    add_calls: list[str] = []
+
+    class FakeRouterAdapter:
+        async def add(self) -> bool:
+            add_calls.append("add")
+            if len(add_calls) == 1:
+                return False
+            return True
+
+        async def remove(self) -> bool:
+            return True
+
+    class FakeEngineProbe:
+        async def ready(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "patio.application.create_router_adapter", lambda topo_type, worker_info: FakeRouterAdapter()
+    )
+    monkeypatch.setattr(
+        "patio.application.create_engine_probe", lambda topo_type, worker_info: FakeEngineProbe()
+    )
+    path = tmp_path / "events.yaml"
+    path.write_text(
+        """
+event_callbacks:
+  start:
+    - engine_wait_ready
+    - router_onboard
+""",
+        encoding="utf-8",
+    )
+    application = PatioApplication(
+        worker_info={"port": 30000},
+        topo_type="sglang",
+        events_config=path,
+        signal_source=MemorySignalSource(),
+        heartbeat_interval=0.01,
+        retry_times=2,
+        retry_interval=0,
+    )
+
+    await application.start()
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if len(add_calls) >= 2:
+            break
+    await application.stop()
+
+    assert len(add_calls) >= 2
 
 
 @pytest.mark.asyncio
@@ -1152,6 +1278,31 @@ async def test_file_signal_source_rejects_non_authoritative_signal(tmp_path: Pat
     assert await source.signals() == set()
 
 
+@pytest.mark.asyncio
+async def test_file_signal_source_caches_authoritative_result(tmp_path: Path):
+    path = tmp_path / "pod-labels"
+    path.write_text('patio.com/router="offboard"\n', encoding="utf-8")
+
+    class CountingClearSource:
+        def __init__(self):
+            self.calls = 0
+
+        async def signals(self) -> set[str]:
+            self.calls += 1
+            return {"patio.com/router=offboard"}
+
+        async def clear(self, signal: str) -> None:
+            pass
+
+    clear_source = CountingClearSource()
+    source = FileSignalSource(labels_path=path, clear_source=clear_source)
+
+    assert await source.signals() == {"patio.com/router=offboard"}
+    assert await source.signals() == {"patio.com/router=offboard"}
+
+    assert clear_source.calls == 1
+
+
 def test_application_selects_file_signal_source(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("LIFECYCLE_RI_NAME", "ri-0")
     monkeypatch.setenv("LIFECYCLE_RI_NAMESPACE", "default")
@@ -1402,11 +1553,15 @@ async def test_vllm_engine_probe_checks_once(monkeypatch):
     monkeypatch.setattr("patio.adapters.engine.vllm.envs.TOPO_HEALTH_CHECK_TIMEOUT", 1)
     response = MagicMock()
     response.status_code = 200
-    with patch("patio.adapters.engine.vllm.requests.get", return_value=response) as get:
+    fake_client = _FakeAsyncHttpClient({"get": [response]})
+    with patch(
+        "patio.adapters.engine.vllm.httpx.AsyncClient",
+        lambda *args, **kwargs: fake_client,
+    ):
         probe = VLLMEngineProbe({"port": 8000})
         assert await probe.ready() is True
 
-    get.assert_called_once()
+    assert len(fake_client.calls["get"]) == 1
 
 
 def test_vllm_engine_probe_does_not_require_router_env(monkeypatch):

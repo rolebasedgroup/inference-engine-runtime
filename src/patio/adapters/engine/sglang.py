@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from urllib.parse import urljoin
 
-import requests
+import httpx
 from prometheus_client.parser import text_string_to_metric_families
 
 from patio import envs
@@ -26,30 +25,24 @@ class SGLangEngineProbe(EngineProbe):
         return f"http://{host}:{port}/health"
 
     async def ready(self) -> bool:
-        def check() -> bool:
-            response = requests.get(
-                self.health_endpoint,
-                timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_HEALTH_CHECK_TIMEOUT),
-            )
-            return response.status_code == 200
-
-        return await asyncio.to_thread(check)
+        async with httpx.AsyncClient(
+            timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_HEALTH_CHECK_TIMEOUT)
+        ) as client:
+            response = await client.get(self.health_endpoint)
+        return response.status_code == 200
 
     async def quiescent(self) -> bool:
-        return await asyncio.to_thread(self._quiescent_sync)
+        return await self._quiescent()
 
-    def _quiescent_sync(self) -> bool:
+    async def _quiescent(self) -> bool:
         if not envs.INFERENCE_ENGINE_ENDPOINT:
             return False
 
         endpoint = urljoin(envs.INFERENCE_ENGINE_ENDPOINT, envs.METRIC_SCRAPE_PATH)
-        try:
-            response = requests.get(
-                endpoint,
-                timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_HEALTH_CHECK_TIMEOUT),
-            )
-        except requests.RequestException:
-            return False
+        async with httpx.AsyncClient(
+            timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_HEALTH_CHECK_TIMEOUT)
+        ) as client:
+            response = await client.get(endpoint)
         if response.status_code != 200:
             return False
 

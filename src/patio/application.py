@@ -59,6 +59,7 @@ class PatioApplication:
             if retry_times is not None
             else envs.get_event_callback_retry_times()
         )
+        self.retry_times = max(1, int(self.retry_times))
         self.retry_interval = (
             retry_interval
             if retry_interval is not None
@@ -246,6 +247,9 @@ class PatioApplication:
     async def start(self) -> None:
         """Run start callbacks and begin polling for hook signals."""
 
+        validate = getattr(self.signal_source, "validate", None)
+        if validate is not None:
+            await validate()
         await self.executor.run_start()
         self._stop_event.clear()
         if self.executor.hook_bindings:
@@ -289,8 +293,23 @@ class PatioApplication:
                     if not self._heartbeat_enabled:
                         self.logger.info("router heartbeat stopped")
                         return
-                    if not await self.router_adapter.add():
-                        raise RuntimeError("router re-registration returned failure")
+                    for attempt in range(1, self.retry_times + 1):
+                        try:
+                            if not await self.router_adapter.add():
+                                raise RuntimeError(
+                                    "router re-registration returned failure"
+                                )
+                            break
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            if attempt >= self.retry_times:
+                                raise
+                            self.logger.warning(
+                                "router heartbeat failed, retrying",
+                                extra={"attempt": attempt, "next_attempt_in": self.retry_interval},
+                            )
+                            await asyncio.sleep(self.retry_interval)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
