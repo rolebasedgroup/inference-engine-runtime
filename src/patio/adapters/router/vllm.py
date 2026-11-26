@@ -59,8 +59,27 @@ class VLLMRouterAdapter(RouterAdapter):
             raise RuntimeError("worker type is required")
         return str(worker_type)
 
-    def _payload(self) -> dict[str, str]:
-        return {"type": self.worker_type, "instance": self.instance}
+    def _payload(self) -> dict[str, Any]:
+        # The official vLLM disaggregated proxy demo uses the singular
+        # "instance" field, while the vLLM Ascend load-balance proxy uses the
+        # plural "instances" field. Keep both fields until vLLM defines one
+        # stable, cross-implementation membership contract.
+        return {
+            "type": self.worker_type,
+            "instance": self.instance,
+            "instances": [self.instance],
+        }
+
+    @staticmethod
+    def _request_succeeded(response: requests.Response) -> bool:
+        if not 200 <= response.status_code < 300:
+            return False
+        try:
+            body = response.json()
+        except ValueError:
+            return True
+        # vLLM Ascend reports some request errors as HTTP 200 JSON bodies.
+        return not isinstance(body, dict) or "error" not in body
 
     async def add(self) -> bool:
         def register() -> bool:
@@ -69,7 +88,7 @@ class VLLMRouterAdapter(RouterAdapter):
                 json=self._payload(),
                 timeout=(envs.TOPO_CONNECT_TIMEOUT, envs.TOPO_REGISTER_TIMEOUT),
             )
-            return 200 <= response.status_code < 300
+            return self._request_succeeded(response)
 
         return await asyncio.to_thread(register)
 
@@ -88,7 +107,12 @@ class VLLMRouterAdapter(RouterAdapter):
                 if is_dns_resolution_failure(exc):
                     return True
                 raise
-            return 200 <= response.status_code < 300
+            # The official vLLM core demo does not expose a remove route. A
+            # 404 therefore means there is no router membership API to call,
+            # not that this worker is still registered.
+            if response.status_code == 404:
+                return True
+            return self._request_succeeded(response)
 
         return await asyncio.to_thread(unregister)
 

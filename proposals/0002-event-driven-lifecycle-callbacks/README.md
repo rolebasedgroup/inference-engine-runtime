@@ -196,7 +196,8 @@ compatible with the legacy client until that client is retired.
 `tests/mock_tests/test_event_callbacks.py` covers YAML parsing, callback
 resolution, ordering, retries, end retry budget, hook starvation, changed-signal
 clearing, heartbeat suspend/resume, membership serialization, both signal
-sources, DNS failure handling, and vLLM single-shot readiness.
+sources, DNS failure handling, vLLM single-shot readiness, and the vLLM proxy
+payload compatibility fields.
 
 ### Integration tests
 
@@ -224,8 +225,13 @@ failing hooks.
 ## Open Questions
 
 <<[UNRESOLVED vLLM maintainers]>>
-Confirm that the vLLM proxy supports `/instances/remove` and its exact payload;
-the legacy client treated unregister as a no-op.
+Confirm which vLLM proxy implementation is the supported integration target and
+whether its membership API is stable. The official vLLM disaggregated proxy demo
+exposes only `/instances/add` with a singular `instance` field; the vLLM Ascend
+load-balance proxy exposes both `/instances/add` and `/instances/remove` with a
+plural `instances` field, and their authentication requirements differ. Until
+the contract is standardized, Patio sends both fields and treats HTTP 404 from
+removal as a no-op because the official demo has no remove route.
 <<[/UNRESOLVED]>>
 
 <<[UNRESOLVED RBG maintainers]>>
@@ -238,7 +244,8 @@ restart re-enable registration after an explicit offboard?
 - 2026-11-18: Initial event callback implementation.
 - 2026-11-24: File signal source and signal execution cooldown.
 - 2026-11-26: Review fixes for atomic clears, membership races, retry budgets,
-  TLS verification, and this proposal.
+  TLS verification, the vLLM proxy payload compatibility fields, and this
+  proposal.
 
 ## References
 
