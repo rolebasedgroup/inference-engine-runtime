@@ -1,0 +1,28 @@
+title: Event-Driven Lifecycle Callbacks
+proposal-number: "0002"
+authors:
+  - "@diw-zw"
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+status: draft
+
+creation-date: 2026-11-26
+last-updated: 2026-11-26
+
+target-version: 0.1.0
+
+areas:
+  - engine
+  - topo
+  - deployment
+  - documentation
+
+issues:
+  - TBD
+see-also:
+  - https://github.com/rolebasedgroup/inference-engine-runtime/pull/15
+replaces:
+  - TBD
